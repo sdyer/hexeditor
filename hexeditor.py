@@ -433,10 +433,13 @@ class HexEditor(object):
         endFirstDisplayLine = max(len(self._data_bytes)//rowByteCount-lastRow + 1, 0)
         lastDisplayLine = self._firstDisplayLine + lastRow - 1
 
-        if normalize or cursorLine < self._firstDisplayLine:
+        if cursorLine < self._firstDisplayLine:
             self._firstDisplayLine = cursorLine
         elif cursorLine > lastDisplayLine:
-            self._firstDisplayLine += cursorLine-lastDisplayLine
+            if normalize:
+                self._firstDisplayLine = cursorLine
+            else:
+                self._firstDisplayLine += cursorLine-lastDisplayLine
 
         self._firstDisplayLine = max(self._firstDisplayLine, 0)
         self._firstDisplayLine = min(self._firstDisplayLine, endFirstDisplayLine)
@@ -444,6 +447,7 @@ class HexEditor(object):
     def mainLoop(self, stdscr):
         curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+        curses.mousemask(curses.BUTTON1_CLICKED)
         self._editChars = ""
         self._modified = False
         # Temporary for debugging
@@ -506,12 +510,12 @@ class HexEditor(object):
                     self.redraw(stdscr)
                 elif ch == curses.KEY_NPAGE or key == 'KEY_NPAGE':
                     # Compute the next page down and set the positions properly and redraw
-                    #self._firstDisplayLine += lastRow
+                    self._firstDisplayLine += lastRow
                     self.moveCursor(rowByteCount * lastRow)
                     self.redraw(stdscr)
                 elif ch == curses.KEY_PPAGE or key == 'KEY_PPAGE':
                     # Compute the previous page up and set the positions properly and redraw
-                    #self._firstDisplayLine -= lastRow
+                    self._firstDisplayLine -= lastRow
                     self.moveCursor(-rowByteCount * lastRow)
                     self.redraw(stdscr)
                 elif ch == curses.KEY_DOWN:
@@ -564,15 +568,22 @@ class HexEditor(object):
                     # Write the file back out. There are no safety rails here.
                     # If you say write it and you have permission, it does it.
                     self.saveFile()
+                elif key == "KEY_MOUSE":
+                    pass
 
             loopCount += 1
             self.auxData.append("%d: %s ==> %s" % (loopCount, ch, key))
+            if key == "KEY_MOUSE":
+                self.auxData.append("Mouse: %r" % (curses.getmouse(),))
             del self.auxData[0:-10]
 
     def makePrintable(self, strVal):
         #return "".join([ch if ch in string.printable else "?" for ch in strVal])
         if self.textFormat == 'ebcdic':
-            strVal = strVal.decode('cp1140').encode('cp1252', errors='replace')
+            try:
+                strVal = strVal.decode('cp1140').encode('cp1252')
+            except:
+                strVal = '.'
         #return strVal if strVal >= " " else "."
         return "".join([ch if ch in string.printable  and ch >= " " else "." for ch in strVal])
 
@@ -646,9 +657,9 @@ class HexEditor(object):
 
     def showFileMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
-            ("Save", "sS", self.saveFile),
-            ("save As", "aA", self.saveAsFile),
-            ("eXit", "xX", self.exit)
+            ("Save", "sS", self.saveFile, False),
+            ("save As", "aA", self.saveAsFile, False),
+            ("eXit", "xX", self.exit, False)
         ])
         
     # File Menu event handlers
@@ -667,38 +678,38 @@ class HexEditor(object):
 
     def showOptionsMenu(self, stdscr, y, x):
         if self.endian == "big":
-            endianTuple = ("set Little endian numbers", "lL", self.toggleEndian)
+            endianTuple = ("set Little endian numbers", "lL", self.toggleEndian, False)
         else:
-            endianTuple = ("set Big endian numbers", "bB", self.toggleEndian)
+            endianTuple = ("set Big endian numbers", "bB", self.toggleEndian, False)
         self.showSubMenu(stdscr, y, x, [
-            ("Data display format", "dD", self.showDataDisplayFormatMenu),
-            ("Text display format", "tT", self.showTextDisplayFormatMenu),
-            ("Offset display format", "oO", self.showOffsetDisplayFormatMenu),
+            ("Data display format", "dD", self.showDataDisplayFormatMenu, False),
+            ("Text display format", "tT", self.showTextDisplayFormatMenu, False),
+            ("Offset display format", "oO", self.showOffsetDisplayFormatMenu, False),
             endianTuple,
         ])
 
     def showDataDisplayFormatMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
-            ("Hex", "hH", partial(self.setDataDisplayFormat, "hex")),
-            ("Decimal", "dD", partial(self.setDataDisplayFormat, "decimal")),
-            ("Octal", "oO", partial(self.setDataDisplayFormat, "octal")),
-            ("Binary", "bB", partial(self.setDataDisplayFormat, "binary")),
+            ("Hex", "hH", partial(self.setDataDisplayFormat, "hex"), self.dataFormat=='hex'),
+            ("Decimal", "dD", partial(self.setDataDisplayFormat, "decimal"), self.dataFormat=='decimal'),
+            ("Octal", "oO", partial(self.setDataDisplayFormat, "octal"), self.dataFormat=='octal'),
+            ("Binary", "bB", partial(self.setDataDisplayFormat, "binary"), self.dataFormat=='binary'),
         ])
     def setDataDisplayFormat(self, df, *args):
         self.dataFormat = df
 
     def showTextDisplayFormatMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
-            ("Ascii", "aA", partial(self.setTextDisplayFormat, "ascii")),
-            ("Ebcdic", "eE", partial(self.setTextDisplayFormat, "ebcdic")),
+            ("Ascii", "aA", partial(self.setTextDisplayFormat, "ascii"), self.textFormat=='ascii'),
+            ("Ebcdic", "eE", partial(self.setTextDisplayFormat, "ebcdic"), self.textFormat=='ebcdic'),
         ])
     def setTextDisplayFormat(self, tf, *args):
         self.textFormat = tf
 
     def showOffsetDisplayFormatMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
-            ("Hex", "hH", partial(self.setOffsetDisplayFormat, "hex")),
-            ("Decimal", "dD", partial(self.setOffsetDisplayFormat, "decimal")),
+            ("Hex", "hH", partial(self.setOffsetDisplayFormat, "hex"), self.offsetFormat=='hex'),
+            ("Decimal", "dD", partial(self.setOffsetDisplayFormat, "decimal"), self.offsetFormat=='decimal'),
         ])
     def setOffsetDisplayFormat(self, of, *args):
         self.offsetFormat = of
@@ -708,9 +719,9 @@ class HexEditor(object):
 
     def showSearchMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
-            ("Goto offset", "gG", self.showNavigateToOffsetFromMenu),
-            ("goto Beginning", "bB", self.navigateToBeginning),
-            ("goto End", "eE", self.navigateToEnd),
+            ("Goto offset", "gG", self.showNavigateToOffsetFromMenu, False),
+            ("goto Beginning", "bB", self.navigateToBeginning, False),
+            ("goto End", "eE", self.navigateToEnd, False),
         ])
 
     def showNavigateToOffsetFromMenu(self, stdscr, *args):
@@ -741,15 +752,15 @@ class HexEditor(object):
             ])
 
     def showSubMenu(self, stdscr, y, x, menuOptions):
-        width = max([len(text) for text, key, subMenuCall in menuOptions])
+        width = max([len(text) for text, key, subMenuCall, isSelected in menuOptions])
         subMenuWin = stdscr.subwin(len(menuOptions)+1, width+5, y, x)
         subMenuWin.erase()
-        for row, (text, key, subMenuCall) in enumerate(menuOptions):
-            subMenuWin.addstr(row, 1, text)
+        for row, (text, key, subMenuCall, isSelected) in enumerate(menuOptions):
+            subMenuWin.addstr(row, 1, text + ('*' if isSelected else ''))
         subMenuWin.refresh()
         key = subMenuWin.getkey()
-        for row, (text, menuKey, subMenuCall) in enumerate(menuOptions):
-            if key in menuKey:
+        for row, (text, menuKey, subMenuCall, isSelected) in enumerate(menuOptions):
+            if key in menuKey and not isSelected:
                 subMenuCall(stdscr, y+row, x+width)
                 break
 
