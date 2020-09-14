@@ -10,7 +10,7 @@ import string
 import struct
 from datetime import datetime
 import time
-from functools import partial
+from functools import partial, wraps
 
 epoch = datetime(1970, 1, 1)
 
@@ -79,6 +79,18 @@ numberBases = {
 >>>
 
 """
+
+# Decorator function for display elements where the mousemask should be clear
+# (ignore mouse events).
+def nomouse(func):
+    @wraps(func)
+    def wrapper_nomouse(*args, **kwargs):
+        avail_mask, saved_mask = curses.mousemask(0)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            curses.mousemask(saved_mask)
+    return wrapper_nomouse
 
 class ExitProgram(Exception):
     pass
@@ -150,22 +162,116 @@ class HexEditor(object):
         with open(filename, 'rb') as f:
             self._data_bytes = f.read()
 
-    def resize(self, stdscr):
+    def computeScreenParams(self, stdscr):
         # Compute all the positions of everything based on the screen size
-        self.maxRow, self.maxCol = stdscr.getmaxyx()
-        if self.dataFormat == 'hex':
-            assert self.maxCol >= 60, "Need at least 60 columns for hex data display (%d)" % self.maxCol 
-        elif self.dataFormat == 'decimal':
-            assert self.maxCol >= 52, "Need at least 52 columns for decimal data display (%d)" % self.maxCol
-        elif self.dataFormat == 'octal':
-            assert self.maxCol >= 62, "Need at least 62 columns for decimal data display (%d)" % self.maxCol
-        elif self.dataFormat == 'binary':
-            assert self.maxCol >= 52, "Need at least 52 columns for decimal data display (%d)" % self.maxCol
+        self.screenRows, self.screenCols = stdscr.getmaxyx()
+        self.offsetWidth = 8
+        (self.dataSectionCount, self.dataSectionBytes, self.dataColByteCount,
+                self.dataDisplayFormat) = byteDisplayFormatMap[self.dataFormat]
+        self.rowByteCount = self.dataSectionCount * self.dataSectionBytes
+
+        self.dataSectionWidth = self.dataSectionCount*self.dataSectionBytes*self.dataColByteCount + self.dataSectionCount - 1
+        self.dataLeftCol = self.offsetWidth + 1
+        self.dataRightCol = self.dataLeftCol + self.dataSectionWidth - 1
+        self.dataFirstRow = 0
+        self.statusRow = self.screenRows-1
+        # TODO Maybe compute last rows more dynamically, depending on how many translated values at the bottom
+        self.valueRow2 = self.statusRow-1
+        self.valueRow1 = self.valueRow2-1
+        self.dataLastRow = self.valueRow1-2
+        self.dataRowCount = self.dataLastRow + 1 - self.dataFirstRow
+
+        self.textSectionWidth = self.dataSectionCount*self.dataSectionBytes + self.dataSectionCount - 1
+        self.textLeftCol = self.dataRightCol+2
+        self.textRightCol = self.textLeftCol + self.textSectionWidth - 1
+
+    @property
+    def textDisplayCursorPos(self):
+        # Return the screen coordinates of self._cursorPos in the text
+        # area. May be used when tabbing into the data display area to decide
+        # where to put the cursor.
+        cursorLine, rowBytePos = divmod(self._cursorPos, self.rowByteCount)
+        lastDisplayLine = self._firstDisplayLine + self.dataRowCount - 1
+
+        # Assume we must be on the visible screen. Presumably we would not use
+        # this when cursorPos is off the screen.
+        assert cursorLine >= self._firstDisplayLine, "Invalid cursorLine: %s" % cursorLine
+        assert cursorLine <= lastDisplayLine, "Invalid cursorLine: %s" % cursorLine
+        yPos = cursorLine - self._firstDisplayLine + self.dataFirstRow
+        # To get the xPosition we need to add the single space between each section
+        xPos = self.textLeftCol + rowBytePos + rowBytePos//self.dataSectionBytes
+        return yPos, xPos
+
+    @property
+    def dataDisplayCursorPos(self):
+        # Return the screen coordinates of self._cursorPos in the data
+        # area. May be used when tabbing into the data display area to decide
+        # where to put the cursor.
+        cursorLine, rowBytePos = divmod(self._cursorPos, self.rowByteCount)
+        lastDisplayLine = self._firstDisplayLine + self.dataRowCount - 1
+
+        # Assume we must be on the visible screen. Presumably we would not use
+        # this when cursorPos is off the screen.
+        assert cursorLine >= self._firstDisplayLine, "Invalid cursorLine: %s" % cursorLine
+        assert cursorLine <= lastDisplayLine, "Invalid cursorLine: %s" % cursorLine
+        yPos = cursorLine - self._firstDisplayLine + self.dataFirstRow
+        # To get the xPosition we need to add the single space between each section
+        xPos = self.dataLeftCol + self.dataColByteCount*rowBytePos + rowBytePos//self.dataSectionBytes
+        return yPos, xPos
+
+    def convertScreenPosToCursorPos(self, y, x):
+        # Convert screen coordinates to the absolute byte position within
+        # the file. (for converting a mouse click to a cursor movement).
+        # First, I guess we decide if it is in the text area or data area. Return None (or maybe the current pos) if outside both.
+        if self.dataFirstRow <= y <= self.dataLastRow:
+            yComponent = self.rowByteCount*(y-self.dataFirstRow+self._firstDisplayLine)
+        else:
+            return None
+        if self.dataLeftCol <= x <= self.dataRightCol:
+            # Data area
+            displayColsPerByte = self.dataColByteCount
+            columnPtr = self.dataLeftCol
+        elif self.textLeftCol <= x <= self.textRightCol:
+            # Text area
+            displayColsPerByte = 1
+            columnPtr = self.textLeftCol
+        else:
+            return None
+        # Inefficient, but we will count our way up until we find our position.
+        # This inner function lets us more easily skip out of the nested for
+        # loops when we find our answer.
+        def findByteOffset(columnPtr):
+            byteOffsetPtr = 0
+            for dataSection in range(self.dataSectionCount):
+                for sectionByteCounter in range(self.dataSectionBytes):
+                    columnPtr += displayColsPerByte
+                    if columnPtr > x:
+                        return byteOffsetPtr
+                    byteOffsetPtr += 1
+                # Increment the columnPtr for the space between sections
+                columnPtr += 1
+            else:
+                assert False, "Should never happen"
+        return yComponent + findByteOffset(columnPtr)
+
+    def resize(self, stdscr):
+        # Compute the required width below instead of constant.
+        self.computeScreenParams(stdscr)
+        assert self.screenCols > self.textRightCol, "Need at least %d columns for %s data display (%d)" % (
+                textRightCol+1, self.dataFormat, self.screenCols) 
+
         # TODO Insted of failing, set a tooNarrowMessage that redraw will
         # display until we resize the screen larger.
-        if curses.is_term_resized(self.maxRow, self.maxCol):
-            curses.resizeterm(self.maxRow, self.maxCol)
+        if curses.is_term_resized(self.screenRows, self.screenCols):
+            curses.resizeterm(self.screenRows, self.screenCols)
 
+
+    @staticmethod
+    def isInRectangle(point, ulPoint, lrPoint):
+        y, x = point
+        uly, ulx = ulPoint
+        lry, lrx = lrPoint
+        return uly <= y <= lry and ulx <= x <= lrx
 
     def redraw(self, stdscr, normalize=False):
         #stdscr.clear()
@@ -173,22 +279,18 @@ class HexEditor(object):
 
         # normalize is when the data format (in particular) has changed. We
         # will shift the row containing the cursor to the first row.
-        dataSectionCount, dataSectionBytes, dataByteColCount, dataDisplayFormat = byteDisplayFormatMap[self.dataFormat]
-        rowByteCount = dataSectionCount * dataSectionBytes
         textDisplayFormat = textDisplayFormatMap[self.dataFormat]
-        textStartCol = 9 + dataSectionCount*dataSectionBytes*dataByteColCount + dataSectionCount
         if normalize:
             # We must draw frames of size rowByteCount. Likely cursor is not on
             # an even boundary. We will make the first line contain cursor
-            self._firstDisplayLine = self._cursorPos // rowByteCount
-        firstRowBytePos = self._firstDisplayLine * rowByteCount
-        lastRow = self.maxRow-4
+            self._firstDisplayLine = self._cursorPos // self.rowByteCount
+        firstRowBytePos = self._firstDisplayLine * self.rowByteCount
         displayRow = 0
         def addstr(row, col, strVal, colornum, addAttr=0):
             attr = curses.A_BOLD if colornum else 0
             stdscr.addstr(row, col, strVal, curses.color_pair(colornum) | attr | addAttr)
             rawLog('row: %r, col: %r, %r (%r)\n' % (row, col, strVal, curses.color_pair(colornum) | attr | addAttr))
-        for rowPtr in range(firstRowBytePos, firstRowBytePos + rowByteCount*lastRow, rowByteCount):
+        for rowPtr in range(firstRowBytePos, firstRowBytePos + self.rowByteCount*(self.dataLastRow+1), self.rowByteCount):
             # Get the row offset in the correct format (hex or decimal)
             if self._offsetFormat == 'hex':
                 offsetStr = "%08x" % rowPtr
@@ -197,11 +299,11 @@ class HexEditor(object):
             stdscr.addstr(displayRow, 0, offsetStr)
 
             displayCol = 9
-            textDisplayCol = textStartCol
+            textDisplayCol = self.textLeftCol
             rowBytePtr = rowPtr
-            for dataSection in range(dataSectionCount):
+            for dataSection in range(self.dataSectionCount):
                 color_num = 0
-                for sectionByteCounter in range(dataSectionBytes):
+                for sectionByteCounter in range(self.dataSectionBytes):
                     if rowBytePtr == self._cursorPos:
                         extraAttr = curses.A_REVERSE | curses.A_BOLD
                         self._displayCursorRow = displayRow
@@ -213,7 +315,7 @@ class HexEditor(object):
                         addstr(displayRow, displayCol, "  ", 0)
                     else:
                         addstr(displayRow, displayCol,
-                                dataDisplayFormat.format(ord(self._data_bytes[rowBytePtr])),
+                                self.dataDisplayFormat.format(ord(self._data_bytes[rowBytePtr])),
                                 color_num, extraAttr)
                     try:
                         if rowBytePtr >= len(self._data_bytes):
@@ -234,7 +336,7 @@ class HexEditor(object):
                         else:
                             raise
                     color_num = 1 - color_num
-                    displayCol += dataByteColCount
+                    displayCol += self.dataColByteCount
                     textDisplayCol += 1
                     rowBytePtr += 1
                 displayCol += 1
@@ -243,21 +345,15 @@ class HexEditor(object):
 
             displayRow += 1
 
-        #stdscr.vline(0, 8, curses.ACS_VLINE, lastRow)
-        #stdscr.vline(0, textStartCol-1, curses.ACS_VLINE, lastRow)
-        stdscr.vline(0, 8, '|', lastRow)
-        stdscr.vline(0, textStartCol-1, '|', lastRow)
-        textSepCol = textStartCol + dataSectionCount*dataSectionBytes + dataSectionCount - 1
-        #stdscr.hline(lastRow, 0, curses.ACS_HLINE, textSepCol)
-        stdscr.hline(lastRow, 0, '-', textSepCol)
-        #stdscr.addch(lastRow, 8, curses.ACS_BTEE)
-        #stdscr.addch(lastRow, textStartCol-1, curses.ACS_BTEE)
-        stdscr.addch(lastRow, 8, '+')
-        stdscr.addch(lastRow, textStartCol-1, '+')
+        stdscr.vline(0, self.dataLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
+        stdscr.vline(0, self.textLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
+        stdscr.hline(self.dataLastRow+1, 0, '-', self.textRightCol)
+        stdscr.addch(self.dataLastRow+1, self.dataLeftCol-1, '+')
+        stdscr.addch(self.dataLastRow+1, self.textLeftCol-1, '+')
 
         endian = ">" if self.endian == "big" else "<"
         # Draw the Int value area
-        valueRow1 = lastRow+1
+        valueRow1 = self.dataLastRow+2
         (byteSigned,) = struct.unpack(endian+'b', self._data_bytes[self._cursorPos])
         byteSignedStr = "S8: %d" % byteSigned
         (byteUnsigned,) = struct.unpack(endian+'B', self._data_bytes[self._cursorPos])
@@ -325,17 +421,16 @@ class HexEditor(object):
         stdscr.addstr(valueRow1+1, timeCol, localTimeStr)
 
         # Update the cursor location, etc.
-        statusRow = lastRow+3
         curStatusCol = 0
         if self._offsetFormat == 'hex':
             cursorPosStr = "Cursor: %08x" % self._cursorPos
         else:
             cursorPosStr = "Cursor: %08d" % self._cursorPos
-        addstr(statusRow, curStatusCol, cursorPosStr, 1, 0)
+        addstr(self.statusRow, curStatusCol, cursorPosStr, 1, 0)
         curStatusCol += len(cursorPosStr)+2
 
         modeStr = "Mode:%s" % self.dataFormat[:3].title()
-        addstr(statusRow, curStatusCol, modeStr, 1, 0)
+        addstr(self.statusRow, curStatusCol, modeStr, 1, 0)
         curStatusCol += len(modeStr) + 2
 
         if self._editChars:
@@ -343,25 +438,33 @@ class HexEditor(object):
             (colSections, bytesPerSection, charsPerByte, formatStr) = byteDisplayFormatMap[self.dataFormat]
             editCharStr = "[%*s]" % (charsPerByte, self._editChars)
             curStatusCol -= 1
-            addstr(statusRow, curStatusCol, editCharStr, 2, 0)
+            addstr(self.statusRow, curStatusCol, editCharStr, 2, 0)
             curStatusCol += len(editCharStr) + 2
 
         if self._modified:
             curStatusCol -= 1
-            addstr(statusRow, curStatusCol, "MOD", 2, 0)
+            addstr(self.statusRow, curStatusCol, "MOD", 2, 0)
             curStatusCol += 3 + 2
 
+        # Show which input area
+        inputAreaStr = "in:%s" % self.inputArea
+        addstr(self.statusRow, curStatusCol, inputAreaStr, 1, 0)
+        curStatusCol += len(inputAreaStr) + 2
+
         sizeStr = "Size: %d" % len(self._data_bytes)
-        addstr(statusRow, curStatusCol, sizeStr, 1, 0)
+        addstr(self.statusRow, curStatusCol, sizeStr, 1, 0)
         curStatusCol += len(sizeStr) + 2
 
         if self.debug:
             for ypos, auxLine in enumerate(self.auxData, 6):
                 stdscr.addstr(ypos, 75, auxLine)
 
-        # TODO Ultimately we need to know which input area our cursor is on the
+        # Ultimately we need to know which input area our cursor is on the
         # screen. We are just assuming the data area for now.
-        stdscr.move(self._displayCursorRow, self._displayDataCursorCol)
+        if self.inputArea == "data":
+            stdscr.move(self._displayCursorRow, self._displayDataCursorCol)
+        else:
+            stdscr.move(self._displayCursorRow, self._displayTextCursorCol)
         try:
             curses.curs_set(2)
         except curses.error:
@@ -412,26 +515,14 @@ class HexEditor(object):
         return "\x1b" + escape, key
 
     def moveCursor(self, byteCount, normalize=False):
-        lastRow = self.maxRow-4
-        dataSectionCount, dataSectionBytes, dataByteColCount, dataDisplayFormat = byteDisplayFormatMap[self.dataFormat]
-        rowByteCount = dataSectionCount * dataSectionBytes
-        #firstScreenRowBytes = self._firstDisplayLine * rowByteCount
-        #lastScreenRowBytes = firstScreenRowBytes + (lastRow) * rowByteCount - 1
         self._cursorPos += byteCount
         if byteCount >= 0:
             self._cursorPos = min(len(self._data_bytes)-1, self._cursorPos)
-            #if self._cursorPos > lastScreenRowBytes:
-            #    self._firstDisplayLine += 1
-            #self._firstDisplayLine = min(self._firstDisplayLine, len(self._data_bytes)//rowByteCount-lastRow + 1)
         if byteCount <= 0:
             self._cursorPos = max(0, self._cursorPos)
-            #if self._cursorPos < firstScreenRowBytes:
-            #    self._firstDisplayLine -= 1
-            #self._firstDisplayLine = max(self._firstDisplayLine, 0)
-        # TODO We need to see if cursorPos in within firstScreenRowBytes and lastScreenRowBytes. If not, we need to co
-        cursorLine = self._cursorPos // rowByteCount
-        endFirstDisplayLine = max(len(self._data_bytes)//rowByteCount-lastRow + 1, 0)
-        lastDisplayLine = self._firstDisplayLine + lastRow - 1
+        cursorLine = self._cursorPos // self.rowByteCount
+        eofFirstDisplayLine = max(len(self._data_bytes)//self.rowByteCount - self.dataRowCount + 1, 0)
+        lastDisplayLine = self._firstDisplayLine + self.dataRowCount - 1
 
         if cursorLine < self._firstDisplayLine:
             self._firstDisplayLine = cursorLine
@@ -442,7 +533,7 @@ class HexEditor(object):
                 self._firstDisplayLine += cursorLine-lastDisplayLine
 
         self._firstDisplayLine = max(self._firstDisplayLine, 0)
-        self._firstDisplayLine = min(self._firstDisplayLine, endFirstDisplayLine)
+        self._firstDisplayLine = min(self._firstDisplayLine, eofFirstDisplayLine)
 
     def mainLoop(self, stdscr):
         curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_BLACK)
@@ -450,6 +541,7 @@ class HexEditor(object):
         curses.mousemask(curses.BUTTON1_CLICKED)
         self._editChars = ""
         self._modified = False
+        self.inputArea = "data"
         # Temporary for debugging
         self.auxData = []
         try:
@@ -465,9 +557,6 @@ class HexEditor(object):
         self.resize(stdscr)
         loopCount = 0
         while True:
-            lastRow = self.maxRow-4
-            dataSectionCount, dataSectionBytes, dataByteColCount, dataDisplayFormat = byteDisplayFormatMap[self.dataFormat]
-            rowByteCount = dataSectionCount * dataSectionBytes
             self.redraw(stdscr)
             ch = stdscr.getch()
 
@@ -484,12 +573,12 @@ class HexEditor(object):
             else:
                 stdscr.timeout(500)
 
-            if key in '0123456789abcdefABCDEF':
+            if self.inputArea == "data" and key in '0123456789abcdefABCDEF':
                 # Here, we know it is not one of the navigation or control
                 # chars. We are editing binary data directly. Skip everything
                 # else.
                 # Track of modified
-                # TODO Accumulate chars (if appropriate for the mode we are in).
+                # Accumulate chars (if appropriate for the mode we are in).
                 (colSections, bytesPerSection, charsPerByte, formatStr) = byteDisplayFormatMap[self.dataFormat]
                 if key in validInputChars[self.dataFormat]:
                     self._editChars += key
@@ -503,6 +592,15 @@ class HexEditor(object):
                         # Reset, whether or not the input was valid.
                         self._editChars = ""
                 self.redraw(stdscr)
+            elif self.inputArea == "text" and 32 <= ch <= 127:
+                try:
+                    encodedByte = chr(ch).encode('cp1252' if self.textFormat == 'ascii' else 'cp1140')
+                    self._data_bytes = self._data_bytes[:self._cursorPos] + encodedByte + self._data_bytes[self._cursorPos+1:]
+                    self._modified = True
+                    self.moveCursor(1)
+                except UnicodeError:
+                    # No edit if illegal char
+                    pass
             else:
                 self._editChars = ""
                 if ch == curses.KEY_RESIZE:
@@ -510,19 +608,19 @@ class HexEditor(object):
                     self.redraw(stdscr)
                 elif ch == curses.KEY_NPAGE or key == 'KEY_NPAGE':
                     # Compute the next page down and set the positions properly and redraw
-                    self._firstDisplayLine += lastRow
-                    self.moveCursor(rowByteCount * lastRow)
+                    self._firstDisplayLine += self.dataRowCount
+                    self.moveCursor(self.rowByteCount * self.dataRowCount)
                     self.redraw(stdscr)
                 elif ch == curses.KEY_PPAGE or key == 'KEY_PPAGE':
                     # Compute the previous page up and set the positions properly and redraw
-                    self._firstDisplayLine -= lastRow
-                    self.moveCursor(-rowByteCount * lastRow)
+                    self._firstDisplayLine -= self.dataRowCount
+                    self.moveCursor(-self.rowByteCount * self.dataRowCount)
                     self.redraw(stdscr)
                 elif ch == curses.KEY_DOWN:
-                    self.moveCursor(rowByteCount)
+                    self.moveCursor(self.rowByteCount)
                     self.redraw(stdscr)
                 elif ch == curses.KEY_UP:
-                    self.moveCursor(-rowByteCount)
+                    self.moveCursor(-self.rowByteCount)
                     self.redraw(stdscr)
                 elif ch == curses.KEY_RIGHT:
                     self.moveCursor(1)
@@ -537,21 +635,27 @@ class HexEditor(object):
                     self.redraw(stdscr)
                 elif key == "KEY_END":
                     self._cursorPos = len(self._data_bytes)-1
-                    #self._firstDisplayLine = len(self._data_bytes) // rowByteCount - lastRow
                     self.moveCursor(0)
                     self.redraw(stdscr)
-                elif key == "\t":
-                    # TODO Change the input area to the next one
-                    pass
+                elif key == "^I":
+                    # Change the input area to the next one
+                    self.inputArea = "data" if self.inputArea == "text" else "text"
                 elif ch == curses.KEY_BTAB:
-                    # TODO Change the input area to the previous one
-                    pass
+                    # Change the input area to the previous one
+                    self.inputArea = "data" if self.inputArea == "text" else "text"
                 elif key == "^G":
                     # Goto offset. + or - at beginning means relative. Open new
                     # Window to prompt.
                     self.showNavigateToOffset(stdscr)
                     self.moveCursor(0, normalize=True)
                     self.redraw(stdscr)
+                elif key == "^F":
+                    # Find (Search)
+                    location = self.showSearchDialog(stdscr)
+                    if location is not None:
+                        self._cursorPos = location
+                        self.moveCursor(0)
+                        self.redraw(stdscr)
                 elif key == "KEY_F(1)":
                     self.showHelp(stdscr)
                     self.redraw(stdscr)
@@ -564,17 +668,42 @@ class HexEditor(object):
                     self.redraw(stdscr)
                 elif key == "KEY_F(10)":
                     self.showMainMenu(stdscr)
+                    # Recompute, because a change in formats changes the screen layout.
+                    self.computeScreenParams(stdscr)
                 elif key == "^W" and self._modified:
                     # Write the file back out. There are no safety rails here.
                     # If you say write it and you have permission, it does it.
                     self.saveFile()
                 elif key == "KEY_MOUSE":
-                    pass
+                    # With the touch pad, I never see BUTTON1_CLICKED, I see BUTTON1_PRESSED followed by BUTTON1_RELEASED
+                    idVal, x, y, z, bstate = curses.getmouse()
+                    if bstate and (curses.BUTTON1_CLICKED or curses.BUTTON1_RELEASED):
+                        # Mouse button was clicked.
+                        # TODO Find where we clicked
+                        if self.isInRectangle((y, x), (self.dataFirstRow, self.dataLeftCol), (self.dataLastRow, self.dataRightCol)):
+                            self.inputArea = "data"
+                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+                            self.redraw(stdscr)
+                        elif self.isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
+                            self.inputArea = "text"
+                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+                            self.redraw(stdscr)
 
             loopCount += 1
             self.auxData.append("%d: %s ==> %s" % (loopCount, ch, key))
-            if key == "KEY_MOUSE":
-                self.auxData.append("Mouse: %r" % (curses.getmouse(),))
+            if key == "KEY_MOUSE" and self.debug:
+                buttonList = []
+                for i in range(1,5):
+                    for state in ("PRESSED", "RELEASED", "CLICKED", "DOUBLE_CLICKED", "TRIPLE_CLICKED",):
+                        stateName = "BUTTON%d_%s" % (i, state)
+                        if bstate & getattr(curses, stateName):
+                            buttonList.append(stateName)
+                for shiftState in ("SHIFT", "CTRL", "ALT"):
+                    stateName = "BUTTON_%s" % shiftState
+                    if bstate & getattr(curses, stateName):
+                        buttonList.append(stateName)
+                stateStr = ' | '.join(buttonList)
+                self.auxData.append("  Mouse: (%d, %d) %d [%s]" % (x, y, bstate, stateStr))
             del self.auxData[0:-10]
 
     def makePrintable(self, strVal):
@@ -582,22 +711,22 @@ class HexEditor(object):
         if self.textFormat == 'ebcdic':
             try:
                 strVal = strVal.decode('cp1140').encode('cp1252')
-            except:
+            except UnicodeError:
                 strVal = '.'
         #return strVal if strVal >= " " else "."
         return "".join([ch if ch in string.printable  and ch >= " " else "." for ch in strVal])
 
-    def showDialog(self, stdscr, lineList):
-        # TODO Make a new window
-        helpWin = stdscr.subwin(20, 50, 2, 5)
-        helpWin.erase()
-        helpWin.bkgdset(' ')
-        helpWin.border('|', '|', '-', '-', '+', '+', '+', '+')
-        # XXX For now using this to display useful information
+    @nomouse
+    def showDialog(self, stdscr, lineList, rowCount=20, colCount=50, startRow=2, startCol=5):
+        # Make a new window
+        win = stdscr.subwin(rowCount, colCount, startRow, startCol)
+        win.erase()
+        win.bkgdset(' ')
+        win.border('|', '|', '-', '-', '+', '+', '+', '+')
         for lineNum, line in enumerate(lineList, 1):
-            helpWin.addstr(lineNum, 1, line)
-        helpWin.refresh()
-        ch = helpWin.getch()
+            win.addstr(lineNum, 1, line)
+        win.refresh()
+        ch = win.getch()
 
     def rectangle(self, win, uly, ulx, lry, lrx):
         win.vline(uly+1, ulx, '|', lry-uly-1)
@@ -609,13 +738,13 @@ class HexEditor(object):
         win.addch(lry, ulx, '+')
         win.addch(lry, lrx, '+')
 
+    @nomouse
     def showNavigateToOffset(self, stdscr):
-        # TODO Make a new window
+        # Make a new window
         navScreen = stdscr.subwin(9, 33, 2, 5)
         navScreen.erase()
         navScreen.bkgdset(' ')
         navScreen.border('|', '|', '-', '-', '+', '+', '+', '+')
-        # XXX For now using this to display useful information
         navScreen.addstr(1, 1, "Enter offset to navigate")
         navScreen.addstr(2, 1, "  + or - for relative movement")
         navScreen.addstr(3, 1, "  Enter to submit")
@@ -626,7 +755,7 @@ class HexEditor(object):
         navScreen.refresh()
         box = Textbox(editWin)
         box.edit()
-        # I think it automatically strips spaces, vbut just in case...
+        # I think it automatically strips spaces, but just in case...
         results = box.gather().strip()
         if not results:
             return
@@ -654,6 +783,130 @@ class HexEditor(object):
                 self._cursorPos = max(0, self._cursorPos - offset)
         else:
             self._cursorPos = min(len(self._data_bytes)-1, offset)
+
+    # TODO May eventually want to use mouse selection here to select search options.
+    @nomouse
+    def showSearchDialog(self, stdscr):
+        # For convenience, make search parameters persistent.
+        if not hasattr(self, 'searchStr'):
+            # Initialize all from defaults
+            self.searchStr = ""
+            self.searchDirection = "forward"
+            self.searchFormat = "text"
+
+        # TODO Define the sub window and draw out the input search elements and the input box
+        # Respond to Ctrl chars (or mouse events?) to change search parameters.
+        # Perhaps even require a Ctrl char to open edit win to update search term
+        # Enter key to run the search
+        searchScreen = stdscr.subwin(12, 55, 0, 0)
+        def redraw():
+            searchScreen.erase()
+            searchScreen.bkgdset(' ')
+            searchScreen.border('|', '|', '-', '-', '+', '+', '+', '+')
+            searchScreen.addstr(1, 1, "^Text: %s" % self.searchStr[:45])
+            def dirSelected(direction):
+                return "*" if self.searchDirection == direction else " "
+            searchScreen.addstr(3, 1, "  ^Direction: [%s] Forward  [%s] Backward" % (
+                dirSelected("forward"), dirSelected("backward")))
+            searchScreen.addstr(5, 1, "  ^Format")
+            def fmtSelected(fmt):
+                return "*" if self.searchFormat == fmt else " "
+            searchScreen.addstr(6, 1, "    [%s] S8   [%s] S16   [%s] S32   [%s] Data" % (
+                fmtSelected("S8"), fmtSelected("S16"), fmtSelected("S32"), fmtSelected("data")))
+            searchScreen.addstr(7, 1, "    [%s] U8   [%s] U16   [%s] U32   [%s] Text" % (
+                fmtSelected("U8"), fmtSelected("U16"), fmtSelected("U32"), fmtSelected("text")))
+            searchScreen.refresh()
+
+        # Now run a main loop for character input here. Also allow a sub edit window overlaying the searchStr for ^T input.
+        stdscr.timeout(-1)
+        while True:
+            redraw()
+            ch = stdscr.getch()
+
+            if ch == 27:
+                ch, key = self.readEscapes(stdscr)
+            else:
+                key = curses.keyname(ch)
+
+            if key == "^T":
+                # Open the editwin to edit the search text
+                self.rectangle(searchScreen, 0, 7, 0+1+1, 7+45+1)
+                editWin = searchScreen.subwin(1, 45, 1, 7+1)
+                searchScreen.refresh()
+                box = Textbox(editWin)
+                box.edit()
+                # I think it automatically strips spaces, but just in case...
+                results = box.gather().strip()
+                self.searchStr = results[:45]
+            elif key == "^D":
+                # Toggle the search direction
+                self.searchDirection = "backward" if self.searchDirection == "forward" else "forward"
+            elif key == "^F":
+                # Toggle through the search format options
+                self.searchFormat = {'S8': 'S16', 'S16': 'S32', 'S32': 'data',
+                        'data': 'U8', 'U8': 'U16', 'U16': 'U32', 'U32': 'text',
+                        'text': 'S8'}[self.searchFormat]
+            elif key == "^J":
+                # Do the search and return the found location (if any)
+                # Step 1: convert the appropriate search input into a string of bytes.
+                # Step 2: Then look for that string of bytes within self._data_bytes
+                if self.searchFormat == "text":
+                    if self.textFormat == 'ebcdic':
+                        try:
+                            bytesStr = self.searchStr.encode('cp1140')
+                        except:
+                            continue
+                    else:
+                        bytesStr = self.searchStr
+                elif self.searchFormat == "data":
+                    # Based on the display format, treat the sequence of digits as a sequence of bytes.
+                    # XXX For our purposes, I assume a complete sequence of bytes. If any are illegal, just silently wait (continue)
+                    # binary must be blocks of 8, octal and decimal, blocks of 3 and hex, blocks of 2.
+                    workingStr = self.searchStr.replace(' ', '')
+                    byteCount, remainder = divmod(len(workingStr), self.dataColByteCount)
+                    if remainder:
+                        # Needs to be an even number of bytes
+                        continue
+                    bytesStr = ""
+                    base = numberBases[self.dataFormat]
+                    try:
+                        for ptr in range(0, len(workingStr), self.dataColByteCount):
+                            bytesStr += chr(int(workingStr[ptr:ptr+self.dataColByteCount], base))
+                    except ValueError as e:
+                        self.auxData.append(str(e))
+                        continue
+                else:
+                    endian = ">" if self.endian == "big" else "<"
+                    if self.searchFormat == "S8":
+                        packFmt = endian+'b'
+                    elif self.searchFormat == "U8":
+                        packFmt = endian+'B'
+                    elif self.searchFormat == "S16":
+                        packFmt = endian+'h'
+                    elif self.searchFormat == "U16":
+                        packFmt = endian+'H'
+                    elif self.searchFormat == "S32":
+                        packFmt = endian+'i'
+                    elif self.searchFormat == "U32":
+                        packFmt = endian+'I'
+                    else:
+                        # Don't think this can happen, but is here as a double check.
+                        continue
+                    try:
+                        bytesStr = struct.pack(packFmt, int(self.searchStr))
+                    except:
+                        # Some kind of bad thing, either num too big or bad numeric
+                        continue
+                # Now search for the byte Str
+                if self.searchDirection == "forward":
+                    index = self._data_bytes.find(bytesStr, self._cursorPos+1)
+                else:
+                    index = self._data_bytes.rfind(bytesStr, 0, self._cursorPos+len(bytesStr)-1)
+                if index > -1:
+                    return index
+            elif key == "^[":
+                # Cancel without any navigation
+                return None
 
     def showFileMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
@@ -719,10 +972,15 @@ class HexEditor(object):
 
     def showSearchMenu(self, stdscr, y, x):
         self.showSubMenu(stdscr, y, x, [
+            ("Search...", "sS", self.showSearchFromMenu, False),
             ("Goto offset", "gG", self.showNavigateToOffsetFromMenu, False),
             ("goto Beginning", "bB", self.navigateToBeginning, False),
             ("goto End", "eE", self.navigateToEnd, False),
         ])
+
+    def showSearchFromMenu(self, stdscr, *args):
+        self.showSearchDialog(stdscr)
+        self.moveCursor(0)
 
     def showNavigateToOffsetFromMenu(self, stdscr, *args):
         self.showNavigateToOffset(stdscr)
@@ -736,21 +994,29 @@ class HexEditor(object):
         self._cursorPos = len(self._data_bytes)
         self.moveCursor(0)
 
+    @nomouse
     def showHelp(self, stdscr, *args):
         self.showDialog(stdscr, [
                 "Scroll with PgUp, PgDown, Up, Down,",
                 "   Right, Left, Home, End",
                 "",
                 "Navigate directly with Ctrl-G",
+                "Search with Ctrl-F",
                 "",
                 "Exit with Ctrl-C",
                 "",
-                "Modify by typing in the data area. Write",
-                "   modified file with Ctrl-W",
+                "Modify by typing in the data or text area.",
+                "   Write modified file with Ctrl-W",
                 "",
                 "Open Menu with F10",
+                "",
+                "Data display: %s" % self.dataFormat,
+                "Text display: %s" % self.textFormat.upper(),
+                "Offset display: %s" % self.offsetFormat,
+                "Endian: %s" % self.endian,
             ])
 
+    @nomouse
     def showSubMenu(self, stdscr, y, x, menuOptions):
         width = max([len(text) for text, key, subMenuCall, isSelected in menuOptions])
         subMenuWin = stdscr.subwin(len(menuOptions)+1, width+5, y, x)
@@ -764,6 +1030,7 @@ class HexEditor(object):
                 subMenuCall(stdscr, y+row, x+width)
                 break
 
+    @nomouse
     def showMainMenu(self, stdscr):
         menuOptions=[
             ("File", 'fF', self.showFileMenu),
