@@ -553,10 +553,14 @@ class HexEditor(object):
         stdscr.clear()
         self._cursorPos = 0
         self._firstDisplayLine = 0
-        # Calling it up front, initializes everything.
-        self.resize(stdscr)
         loopCount = 0
         while True:
+            # This might be way overkill, but in many cases we might not be
+            # able to detect that a resize has occurred. It might just make
+            # sense to check every time through and react. Running resize
+            # before redrawing the screen lets us react properly if someone
+            # resized while a dialog was open.
+            self.resize(stdscr)
             self.redraw(stdscr)
             ch = stdscr.getch()
 
@@ -568,7 +572,6 @@ class HexEditor(object):
             if ch == -1:
                 stdscr.timeout(-1)
                 stdscr.clearok(True)
-                self.redraw(stdscr)
                 continue
             else:
                 stdscr.timeout(500)
@@ -591,7 +594,6 @@ class HexEditor(object):
                             self.moveCursor(1)
                         # Reset, whether or not the input was valid.
                         self._editChars = ""
-                self.redraw(stdscr)
             elif self.inputArea == "text" and 32 <= ch <= 127:
                 try:
                     encodedByte = chr(ch).encode('cp1252' if self.textFormat == 'ascii' else 'cp1140')
@@ -605,38 +607,29 @@ class HexEditor(object):
                 self._editChars = ""
                 if ch == curses.KEY_RESIZE:
                     self.resize(stdscr)
-                    self.redraw(stdscr)
                 elif ch == curses.KEY_NPAGE or key == 'KEY_NPAGE':
                     # Compute the next page down and set the positions properly and redraw
                     self._firstDisplayLine += self.dataRowCount
                     self.moveCursor(self.rowByteCount * self.dataRowCount)
-                    self.redraw(stdscr)
                 elif ch == curses.KEY_PPAGE or key == 'KEY_PPAGE':
                     # Compute the previous page up and set the positions properly and redraw
                     self._firstDisplayLine -= self.dataRowCount
                     self.moveCursor(-self.rowByteCount * self.dataRowCount)
-                    self.redraw(stdscr)
                 elif ch == curses.KEY_DOWN:
                     self.moveCursor(self.rowByteCount)
-                    self.redraw(stdscr)
                 elif ch == curses.KEY_UP:
                     self.moveCursor(-self.rowByteCount)
-                    self.redraw(stdscr)
                 elif ch == curses.KEY_RIGHT:
                     self.moveCursor(1)
-                    self.redraw(stdscr)
                 elif ch == curses.KEY_LEFT:
                     self.moveCursor(-1)
-                    self.redraw(stdscr)
                 elif key == "KEY_HOME":
                     self._cursorPos = 0
                     #self._firstDisplayLine = 0
                     self.moveCursor(0)
-                    self.redraw(stdscr)
                 elif key == "KEY_END":
                     self._cursorPos = len(self._data_bytes)-1
                     self.moveCursor(0)
-                    self.redraw(stdscr)
                 elif key == "^I":
                     # Change the input area to the next one
                     self.inputArea = "data" if self.inputArea == "text" else "text"
@@ -648,28 +641,28 @@ class HexEditor(object):
                     # Window to prompt.
                     self.showNavigateToOffset(stdscr)
                     self.moveCursor(0, normalize=True)
-                    self.redraw(stdscr)
                 elif key == "^F":
                     # Find (Search)
                     location = self.showSearchDialog(stdscr)
                     if location is not None:
                         self._cursorPos = location
                         self.moveCursor(0)
-                        self.redraw(stdscr)
                 elif key == "KEY_F(1)":
                     self.showHelp(stdscr)
-                    self.redraw(stdscr)
                 elif self.debug and (key == "KEY_F(11)"):
                     self.showDialog(stdscr, [
                         "curses.has_colors() ==> %r" % curses.has_colors(),
                         "curses.can_change_color() ==> %r" % curses.can_change_color(),
                         "curses.COLORS ==> %r" % curses.COLORS,
                     ])
-                    self.redraw(stdscr)
                 elif key == "KEY_F(10)":
                     self.showMainMenu(stdscr)
                     # Recompute, because a change in formats changes the screen layout.
                     self.computeScreenParams(stdscr)
+                    # And, just in case the format change shifted the cursor
+                    # off screen, do a dummy null move, which will scroll, only
+                    # if necessary, to get back on screen.
+                    self.moveCursor(0)
                 elif key == "^W" and self._modified:
                     # Write the file back out. There are no safety rails here.
                     # If you say write it and you have permission, it does it.
@@ -679,15 +672,13 @@ class HexEditor(object):
                     idVal, x, y, z, bstate = curses.getmouse()
                     if bstate and (curses.BUTTON1_CLICKED or curses.BUTTON1_RELEASED):
                         # Mouse button was clicked.
-                        # TODO Find where we clicked
+                        # Find where we clicked
                         if self.isInRectangle((y, x), (self.dataFirstRow, self.dataLeftCol), (self.dataLastRow, self.dataRightCol)):
                             self.inputArea = "data"
                             self._cursorPos = self.convertScreenPosToCursorPos(y, x)
-                            self.redraw(stdscr)
                         elif self.isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
                             self.inputArea = "text"
                             self._cursorPos = self.convertScreenPosToCursorPos(y, x)
-                            self.redraw(stdscr)
 
             loopCount += 1
             self.auxData.append("%d: %s ==> %s" % (loopCount, ch, key))
