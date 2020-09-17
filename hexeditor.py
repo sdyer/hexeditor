@@ -12,6 +12,11 @@ from datetime import datetime
 import time
 from functools import partial, wraps
 
+# Discussion of handling mouse escape sequences can be found at:
+#   http://manpages.ubuntu.com/manpages/xenial/man4/console_codes.4.html
+#   ftp://xcb.freedesktop.org/pub/X11R6.7.0/PDF/ctlseqs.pdf
+#   https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Mouse-Tracking
+
 epoch = datetime(1970, 1, 1)
 
 def rawLog(strVal):
@@ -19,32 +24,6 @@ def rawLog(strVal):
     with open('hexEditor.py.log', 'a') as f:
         f.write(strVal)
 
-# XXX Unneeded now.
-rowByteCountMap = {
-        'hex': 16,
-        'decimal': 10,
-        'octal': 12,
-        'binary': 4,
-}
-# XXX Unneeded now.
-colTextPosStartMap = {
-        'hex':     8+1 + 2*16 + 2,
-        'decimal': 8+1 + 2*15 + 2,
-        'octal':   8+1 + 3*12 + 3,
-        'binary':  8+1 + 4*8  + 4,
-}
-byteDisplayFormatMap = {
-        'hex': " ".join(2*[8*"{:02x}"]),
-        'decimal': " ".join(2*[5*"{:03d}"]),
-        'octal': " ".join(3*[4*"{:03o}"]),
-        'binary': " ".join(4*["{:08b}"]),
-}
-textDisplayFormatMap = {
-        'hex': " ".join(2*[8*"{}"]),
-        'decimal': " ".join(2*[5*"{}"]),
-        'octal': " ".join(3*[4*"{}"]),
-        'binary': " ".join(4*["{}"]),
-}
 # This is the version where we output byte at a time
 byteDisplayFormatMap = {
         # Value is a 4-tuple: number of column sections, number of bytes in a
@@ -284,7 +263,6 @@ class HexEditor(object):
         ####################################
         # normalize is when the data format (in particular) has changed. We
         # will shift the row containing the cursor to the first row.
-        textDisplayFormat = textDisplayFormatMap[self.dataFormat]
         if normalize:
             # We must draw frames of size rowByteCount. Likely cursor is not on
             # an even boundary. We will make the first line contain cursor
@@ -560,9 +538,19 @@ class HexEditor(object):
         curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
         curses.mousemask(curses.BUTTON1_CLICKED)
+        # We inconsistently see mouse events get sent, even when we set
+        # mousemask, so we will also manually send an X11 escape sequence as
+        # well. Not completely sure what we will see in this case, but if it
+        # comes through as a curses KEY_MOUSE character, we will respond to
+        # that. Otherwise we will try to capture and decode the raw escape
+        # sequences.
+        sys.stdout.write("\x1b[?1000h")
+        sys.stdout.flush()
+        curses.cbreak()
         self._editChars = ""
         self._modified = False
         self.inputArea = "data"
+        curRawMouseState = None
         # Temporary for debugging
         self.auxData = []
         try:
@@ -597,7 +585,7 @@ class HexEditor(object):
             else:
                 stdscr.timeout(500)
 
-            if self.inputArea == "data" and key in '0123456789abcdefABCDEF':
+            if self.inputArea == "data" and key and key in '0123456789abcdefABCDEF':
                 # Here, we know it is not one of the navigation or control
                 # chars. We are editing binary data directly. Skip everything
                 # else.
@@ -700,9 +688,27 @@ class HexEditor(object):
                         elif self.isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
                             self.inputArea = "text"
                             self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+                elif isinstance(ch, str) and ch.startswith("\x1b[M") and len(ch) == 6:
+                    if ord(ch[-3]) & 3 == 0:
+                        curRawMouseState = curses.BUTTON1_PRESSED
+                    elif curRawMouseState == curses.BUTTON1_PRESSED and ord(ch[-3]) & 3 == 3:
+                        curRawMouseState = None
+                        # Now we have a mouse up after button was pressed (or
+                        #   curses.BUTTON1_RELEASED)
+                        xCode, yCode = tuple(ch[-2:])
+                        x = ord(xCode) - 33
+                        y = ord(yCode) - 33
+                        # Mouse button was clicked.
+                        # Find where we clicked (Repeated from above)
+                        if self.isInRectangle((y, x), (self.dataFirstRow, self.dataLeftCol), (self.dataLastRow, self.dataRightCol)):
+                            self.inputArea = "data"
+                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+                        elif self.isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
+                            self.inputArea = "text"
+                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
 
             loopCount += 1
-            self.auxData.append("%d: %s ==> %s" % (loopCount, ch, key))
+            self.auxData.append("%d: %r ==> %s" % (loopCount, ch, key))
             if key == "KEY_MOUSE" and self.debug:
                 buttonList = []
                 for i in range(1,5):
@@ -1111,3 +1117,7 @@ if __name__=="__main__":
         curses.wrapper(editor.mainLoop)
     except (ExitProgram, KeyboardInterrupt):
         pass
+    finally:
+        # Make sure to send the terminal code to stop sending mouse event
+        # escape sequences.
+        sys.stdout.write("\x1b[?1000l")
