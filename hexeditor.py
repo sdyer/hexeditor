@@ -277,6 +277,11 @@ class HexEditor(object):
         #stdscr.clear()
         stdscr.erase()
 
+        ####################################
+        #
+        # Offset, Data and Text areas
+        #
+        ####################################
         # normalize is when the data format (in particular) has changed. We
         # will shift the row containing the cursor to the first row.
         textDisplayFormat = textDisplayFormatMap[self.dataFormat]
@@ -345,12 +350,23 @@ class HexEditor(object):
 
             displayRow += 1
 
+        
+        ####################################
+        #
+        # Separator lines
+        #
+        ####################################
         stdscr.vline(0, self.dataLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
         stdscr.vline(0, self.textLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
         stdscr.hline(self.dataLastRow+1, 0, '-', self.textRightCol)
         stdscr.addch(self.dataLastRow+1, self.dataLeftCol-1, '+')
         stdscr.addch(self.dataLastRow+1, self.textLeftCol-1, '+')
 
+        ####################################
+        #
+        # Auxiliary data values
+        #
+        ####################################
         endian = ">" if self.endian == "big" else "<"
         # Draw the Int value area
         valueRow1 = self.dataLastRow+2
@@ -420,6 +436,11 @@ class HexEditor(object):
         stdscr.addstr(valueRow1, timeCol, gmTimeStr)
         stdscr.addstr(valueRow1+1, timeCol, localTimeStr)
 
+        ####################################
+        #
+        # Status Bar
+        #
+        ####################################
         # Update the cursor location, etc.
         curStatusCol = 0
         if self._offsetFormat == 'hex':
