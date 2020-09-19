@@ -6,10 +6,10 @@ import sys
 import curses
 from curses.textpad import Textbox, rectangle
 import time
+import calendar
 import string
 import struct
 from datetime import datetime
-import time
 from functools import partial, wraps
 
 # Discussion of handling mouse escape sequences can be found at:
@@ -59,6 +59,156 @@ numberBases = {
 
 """
 
+
+def isInRectangle(point, ulPoint, lrPoint):
+    y, x = point
+    uly, ulx = ulPoint
+    lry, lrx = lrPoint
+    return uly <= y <= lry and ulx <= x <= lrx
+
+class DataField(object):
+    max_size = 0
+
+    def __init__(self, hex_editor):
+        self._hex_editor = hex_editor
+
+    @property
+    def strVal(self):
+        return self._strVal
+
+    @strVal.setter
+    def strVal(self, val):
+        raise NotImplementedError("Must be overridden")
+
+    def output(self, win, y, x, colornum):
+        outStr = "%s: %s" % (self.header, self._strVal)
+        win.addstr(y, x, outStr, curses.color_pair(colornum))
+        self.displayWidth = len(outStr)
+        self.y = y
+        self.x = x
+
+    def containsPoint(self, y, x):
+        return isInRectangle((y, x), (self.y, self.x), (self.y, self.x+self.displayWidth-1))
+
+class IntField(DataField):
+    def __init__(self, hex_editor):
+        DataField.__init__(self, hex_editor)
+        endian = ">" if self._hex_editor.endian == "big" else "<"
+        self.cursorPos = self._hex_editor._cursorPos
+        if self.cursorPos + self.byte_count <= len(self._hex_editor._data_bytes):
+            byteStr = self._hex_editor._data_bytes[self.cursorPos:self.cursorPos+self.byte_count]
+            (intVal,) = struct.unpack(endian+self.recFmt, byteStr)
+            self._strVal = "%d" % intVal
+        else:
+            self._strVal = None
+
+    @property
+    def strVal(self):
+        return self._strVal
+
+    @strVal.setter
+    def strVal(self, val):
+        if self.cursorPos + self.byte_count <= len(self._hex_editor._data_bytes):
+            self._strVal = val
+            endian = ">" if self._hex_editor.endian == "big" else "<"
+            bytesStr = struct.pack(endian+self.recFmt, int(val))
+            self._hex_editor._data_bytes = (
+                    self._hex_editor._data_bytes[:self.cursorPos] + 
+                    bytesStr + 
+                    self._hex_editor._data_bytes[self.cursorPos+len(bytesStr):]
+                    )
+        else:
+            self._strVal = None
+
+class S8Field(IntField):
+    recFmt = 'b'
+    header = 'S8'
+    byte_count = 1
+    max_size = 4
+
+class U8Field(IntField):
+    recFmt = 'B'
+    header = 'U8'
+    byte_count = 1
+    max_size = 3
+
+class S16Field(IntField):
+    recFmt = 'h'
+    header = 'S16'
+    byte_count = 2
+    max_size = 6
+
+class U16Field(IntField):
+    recFmt = 'H'
+    header = 'U16'
+    byte_count = 2
+    max_size = 5
+
+class S32Field(IntField):
+    recFmt = 'i'
+    header = 'S32'
+    byte_count = 4
+    max_size = 11
+
+class U32Field(IntField):
+    recFmt = 'I'
+    header = 'U32'
+    byte_count = 4
+    max_size = 10
+
+class TimestampField(DataField):
+    byte_count = 4
+    recFmt = 'i'
+    max_size = 19
+    timeFmt = '%Y/%m/%d %H:%M:%S'
+
+    def __init__(self, hex_editor):
+        DataField.__init__(self, hex_editor)
+        endian = ">" if self._hex_editor.endian == "big" else "<"
+        self.cursorPos = self._hex_editor._cursorPos
+        if self.cursorPos + self.byte_count <= len(self._hex_editor._data_bytes):
+            byteStr = self._hex_editor._data_bytes[self.cursorPos:self.cursorPos+self.byte_count]
+            (intVal,) = struct.unpack(endian+self.recFmt, byteStr)
+            self._strVal = time.strftime(self.timeFmt, self.timeFunc(intVal))
+        else:
+            self._strVal = None
+
+    @property
+    def strVal(self):
+        return self._strVal
+
+    @strVal.setter
+    def strVal(self, val):
+        if self.cursorPos + self.byte_count <= len(self._hex_editor._data_bytes):
+            try:
+                ts = time.strptime(val, self.timeFmt)
+            except Exception as e:
+                # Would be better to give feedback here...
+                self._hex_editor.auxData.append(str(e))
+                return
+            intVal = self.inverseTimeFunc(ts)
+            endian = ">" if self._hex_editor.endian == "big" else "<"
+            bytesStr = struct.pack(endian+self.recFmt, intVal)
+            self._hex_editor._data_bytes = (
+                    self._hex_editor._data_bytes[:self.cursorPos] + 
+                    bytesStr + 
+                    self._hex_editor._data_bytes[self.cursorPos+len(bytesStr):]
+                    )
+        else:
+            self._strVal = None
+
+class UTCField(TimestampField):
+    header = "UTC"
+    timeFunc = time.gmtime
+    def inverseTimeFunc(self, ts):
+        return calendar.timegm(ts)
+
+class CSTField(TimestampField):
+    header = "CST"
+    timeFunc = time.localtime
+    def inverseTimeFunc(self, ts):
+        return time.mktime(ts)
+
 # Decorator function for display elements where the mousemask should be clear
 # (ignore mouse events).
 def nomouse(func):
@@ -79,6 +229,13 @@ class ExitProgram(Exception):
 # with just a small buffer, but that makes everything much more complicated
 # when editing and maybe not saving.
 class HexEditor(object):
+    # For displaying data at the bottom of the screen
+    complexDataClassRows = [
+        [S8Field, S16Field, S32Field, UTCField],
+        [U8Field, U16Field, U32Field, CSTField],
+    ]
+    complexDataInstanceRows = None
+
     @property
     def textFormat(self):
         return self._textFormat
@@ -154,15 +311,21 @@ class HexEditor(object):
         self.dataRightCol = self.dataLeftCol + self.dataSectionWidth - 1
         self.dataFirstRow = 0
         self.statusRow = self.screenRows-1
-        # TODO Maybe compute last rows more dynamically, depending on how many translated values at the bottom
-        self.valueRow2 = self.statusRow-1
-        self.valueRow1 = self.valueRow2-1
-        self.dataLastRow = self.valueRow1-2
+        # Maybe compute last rows more dynamically, depending on how many translated values at the bottom
+        self.dataLastRow = self.statusRow-len(self.complexDataInstanceRows)-2
         self.dataRowCount = self.dataLastRow + 1 - self.dataFirstRow
 
         self.textSectionWidth = self.dataSectionCount*self.dataSectionBytes + self.dataSectionCount - 1
         self.textLeftCol = self.dataRightCol+2
         self.textRightCol = self.textLeftCol + self.textSectionWidth - 1
+
+    def setDataFields(self):
+        self.complexDataInstanceRows = []
+        for complexDataClassRow in self.complexDataClassRows:
+            complexInstanceRow = []
+            for complexDataClass in complexDataClassRow:
+                complexInstanceRow.append(complexDataClass(self))
+            self.complexDataInstanceRows.append(complexInstanceRow)
 
     @property
     def textDisplayCursorPos(self):
@@ -244,13 +407,6 @@ class HexEditor(object):
         if curses.is_term_resized(self.screenRows, self.screenCols):
             curses.resizeterm(self.screenRows, self.screenCols)
 
-
-    @staticmethod
-    def isInRectangle(point, ulPoint, lrPoint):
-        y, x = point
-        uly, ulx = ulPoint
-        lry, lrx = lrPoint
-        return uly <= y <= lry and ulx <= x <= lrx
 
     def redraw(self, stdscr, normalize=False):
         #stdscr.clear()
@@ -345,74 +501,12 @@ class HexEditor(object):
         # Auxiliary data values
         #
         ####################################
-        endian = ">" if self.endian == "big" else "<"
-        # Draw the Int value area
-        valueRow1 = self.dataLastRow+2
-        (byteSigned,) = struct.unpack(endian+'b', self._data_bytes[self._cursorPos])
-        byteSignedStr = "S8: %d" % byteSigned
-        (byteUnsigned,) = struct.unpack(endian+'B', self._data_bytes[self._cursorPos])
-        byteUnsignedStr = "U8: %d" % byteUnsigned
-        stdscr.addstr(valueRow1, 0, byteSignedStr)
-        stdscr.addstr(valueRow1+1, 0, byteUnsignedStr)
-
-        wordCol = max(len(byteSignedStr), len(byteUnsignedStr)) + 2
-        wordRaw = self._data_bytes[self._cursorPos:self._cursorPos+2]
-        if len(wordRaw) == 2:
-            (wordSigned,) = struct.unpack(endian+'h', wordRaw)
-            wordSignedStr = "S16: %d" % wordSigned
-            (wordUnsigned,) = struct.unpack(endian+'H', wordRaw)
-            wordUnsignedStr = "U16: %d" % wordUnsigned
-        else:
-            wordSignedStr = "S16:"
-            wordUnsignedStr = "U16:"
-        stdscr.addstr(valueRow1, wordCol, wordSignedStr)
-        stdscr.addstr(valueRow1+1, wordCol, wordUnsignedStr)
-
-        longCol = wordCol + max(len(wordSignedStr), len(wordUnsignedStr)) + 2
-        longRaw = self._data_bytes[self._cursorPos:self._cursorPos+4]
-        if len(longRaw) == 4:
-            (longSigned,) = struct.unpack(endian+'i', self._data_bytes[self._cursorPos:self._cursorPos+4])
-            longSignedStr = "S32: %d" % longSigned
-            (longUnsigned,) = struct.unpack(endian+'I', self._data_bytes[self._cursorPos:self._cursorPos+4])
-            longUnsignedStr = "U32: %d" % longUnsigned
-        else:
-            longUnsigned = None
-            longSignedStr = "S32:"
-            longUnsignedStr = "U32:"
-        stdscr.addstr(valueRow1, longCol, longSignedStr)
-        stdscr.addstr(valueRow1+1, longCol, longUnsignedStr)
-
-        timeCol = longCol + max(len(longSignedStr), len(longUnsignedStr)) + 2
-        # Here we do some ePriority specific timestamp parsing instead if requested.
-        if self.mailbag:
-            tsChars = self._data_bytes[self._cursorPos:self._cursorPos+8].strip()
-            try:
-                tsIntVal = int(tsChars, 16)
-            except:
-                tsIntVal = None
-            if len(tsChars) == 8 and tsIntVal is not None:
-                tickCount = tsIntVal
-                gmTime = time.gmtime(tickCount)
-                localTime = time.localtime(tickCount)
-                gmTimeStr = time.strftime('UTC: %Y/%m/%d %H:%M:%S', gmTime)
-                localTimeStr = time.strftime('CST: %Y/%m/%d %H:%M:%S', localTime)
-            else:
-                gmTimeStr = "UTC:"
-                localTimeStr = "CST:"
-        else:
-            # TODO At some point work out whether/how to support a 64bit
-            # timestamp, which is already common in some environments.
-            if longUnsigned:
-                tickCount = longSigned
-                gmTime = time.gmtime(tickCount)
-                localTime = time.localtime(tickCount)
-                gmTimeStr = time.strftime('UTC: %Y/%m/%d %H:%M:%S', gmTime)
-                localTimeStr = time.strftime('CST: %Y/%m/%d %H:%M:%S', localTime)
-            else:
-                gmTimeStr = "UTC:"
-                localTimeStr = "CST:"
-        stdscr.addstr(valueRow1, timeCol, gmTimeStr)
-        stdscr.addstr(valueRow1+1, timeCol, localTimeStr)
+        firstValueRow = self.statusRow - len(self.complexDataInstanceRows)
+        for rowOffset, complexInstanceRow in enumerate(self.complexDataInstanceRows):
+            colOffset = 0 
+            for complexDataInstance in complexInstanceRow:
+                complexDataInstance.output(stdscr, firstValueRow+rowOffset, colOffset, 0)
+                colOffset += complexDataInstance.displayWidth + 2
 
         ####################################
         #
@@ -534,6 +628,28 @@ class HexEditor(object):
         self._firstDisplayLine = max(self._firstDisplayLine, 0)
         self._firstDisplayLine = min(self._firstDisplayLine, eofFirstDisplayLine)
 
+    def performMouseClick(self, y, x, stdscr):
+        # Only called from within mainLoop. Multiple possible ways to detect a
+        # mouse click, so we refactor the action to here to avoid repeated
+        # complex code.
+        if isInRectangle((y, x), (self.dataFirstRow, self.dataLeftCol), (self.dataLastRow, self.dataRightCol)):
+            self.inputArea = "data"
+            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+        elif isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
+            self.inputArea = "text"
+            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+        else:
+            # One more chance. Walk through the data values to see if one of
+            # them was clicked
+            for complexInstanceRow in self.complexDataInstanceRows:
+                for complexDataInstance in complexInstanceRow:
+                    if complexDataInstance.containsPoint(y, x):
+                        # Do the editing and exit
+                        self.auxData.append(complexDataInstance.header+" clicked")
+                        # Open an edit window with the complexDataInstance passed in.
+                        self.showEditDialog(stdscr, complexDataInstance)
+                        return
+
     def mainLoop(self, stdscr):
         curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
@@ -569,6 +685,7 @@ class HexEditor(object):
             # sense to check every time through and react. Running resize
             # before redrawing the screen lets us react properly if someone
             # resized while a dialog was open.
+            self.setDataFields()
             self.resize(stdscr)
             self.redraw(stdscr)
             ch = stdscr.getch()
@@ -681,13 +798,8 @@ class HexEditor(object):
                     idVal, x, y, z, bstate = curses.getmouse()
                     if bstate and (curses.BUTTON1_CLICKED or curses.BUTTON1_RELEASED):
                         # Mouse button was clicked.
-                        # Find where we clicked
-                        if self.isInRectangle((y, x), (self.dataFirstRow, self.dataLeftCol), (self.dataLastRow, self.dataRightCol)):
-                            self.inputArea = "data"
-                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
-                        elif self.isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
-                            self.inputArea = "text"
-                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+                        # Find where we clicked and perform appropriate action
+                        self.performMouseClick(y, x, stdscr)
                 elif isinstance(ch, str) and ch.startswith("\x1b[M") and len(ch) == 6:
                     if ord(ch[-3]) & 3 == 0:
                         curRawMouseState = curses.BUTTON1_PRESSED
@@ -700,12 +812,7 @@ class HexEditor(object):
                         y = ord(yCode) - 33
                         # Mouse button was clicked.
                         # Find where we clicked (Repeated from above)
-                        if self.isInRectangle((y, x), (self.dataFirstRow, self.dataLeftCol), (self.dataLastRow, self.dataRightCol)):
-                            self.inputArea = "data"
-                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
-                        elif self.isInRectangle((y, x), (self.dataFirstRow, self.textLeftCol), (self.dataLastRow, self.textRightCol)):
-                            self.inputArea = "text"
-                            self._cursorPos = self.convertScreenPosToCursorPos(y, x)
+                        self.performMouseClick(y, x, stdscr)
 
             loopCount += 1
             self.auxData.append("%d: %r ==> %s" % (loopCount, ch, key))
@@ -801,6 +908,27 @@ class HexEditor(object):
                 self._cursorPos = max(0, self._cursorPos - offset)
         else:
             self._cursorPos = min(len(self._data_bytes)-1, offset)
+
+    @nomouse
+    def showEditDialog(self, stdscr, complexDataInstance):
+        #
+        editScreen = stdscr.subwin(12, 55, 0, 0)
+        editScreen.erase()
+        editScreen.bkgdset(' ')
+        editScreen.border('|', '|', '-', '-', '+', '+', '+', '+')
+        editScreen.addstr(1, 1, "Edit pattern hint")
+
+        self.rectangle(editScreen, 5, 5, 5+1+1, 5+complexDataInstance.max_size+2)
+        editWin = editScreen.subwin(1, complexDataInstance.max_size+1, 5+1, 5+1)
+        editScreen.refresh()
+        box = Textbox(editWin)
+        editWin.addstr(0, 0, complexDataInstance.strVal)
+        box.edit()
+        # I think it automatically strips spaces, but just in case...
+        results = box.gather().strip()
+        if results != complexDataInstance.strVal:
+            complexDataInstance.strVal = results
+            self._modified = True
 
     # TODO May eventually want to use mouse selection here to select search options.
     @nomouse
