@@ -209,6 +209,50 @@ class CSTField(TimestampField):
     def inverseTimeFunc(self, ts):
         return time.mktime(ts)
 
+# ePriority Mailbag timestamp field
+class MBTimestampField(DataField):
+    byte_count = 8
+    max_size = 19
+    header = 'UTC'
+    timeFmt = '%Y/%m/%d %H:%M:%S'
+
+    def __init__(self, hex_editor):
+        DataField.__init__(self, hex_editor)
+        self.cursorPos = self._hex_editor._cursorPos
+        if self.cursorPos + self.byte_count <= len(self._hex_editor._data_bytes) and self._hex_editor._data_bytes:
+            byteStr = self._hex_editor._data_bytes[self.cursorPos:self.cursorPos+self.byte_count]
+            try:
+                intVal = int(byteStr, 16)
+            except ValueError:
+                self._strVal = None
+                return
+            self._strVal = time.strftime(self.timeFmt, time.gmtime(intVal))
+        else:
+            self._strVal = None
+
+    @property
+    def strVal(self):
+        return self._strVal
+
+    @strVal.setter
+    def strVal(self, val):
+        if self.cursorPos + self.byte_count <= len(self._hex_editor._data_bytes):
+            try:
+                ts = time.strptime(val, self.timeFmt)
+            except Exception as e:
+                # Would be better to give feedback here...
+                self._hex_editor.auxData.append(str(e))
+                return
+            intVal = calendar.timegm(ts)
+            bytesStr = "%08x" % intVal
+            self._hex_editor._data_bytes = (
+                    self._hex_editor._data_bytes[:self.cursorPos] + 
+                    bytesStr + 
+                    self._hex_editor._data_bytes[self.cursorPos+len(bytesStr):]
+                    )
+        else:
+            self._strVal = None
+
 # Decorator function for display elements where the mousemask should be clear
 # (ignore mouse events).
 def nomouse(func):
@@ -278,6 +322,17 @@ class HexEditor(object):
     @mailbag.setter
     def mailbag(self, mb):
         self._mailbag = bool(mb)
+        if mb:
+            self.complexDataClassRows = [
+                [S8Field, S16Field, S32Field, MBTimestampField],
+                [U8Field, U16Field, U32Field, ],
+            ]
+        else:
+            self.complexDataClassRows = [
+                [S8Field, S16Field, S32Field, UTCField],
+                [U8Field, U16Field, U32Field, CSTField],
+            ]
+        complexDataInstanceRows = None
 
     @property
     def debug(self):
@@ -922,7 +977,7 @@ class HexEditor(object):
         editWin = editScreen.subwin(1, complexDataInstance.max_size+1, 5+1, 5+1)
         editScreen.refresh()
         box = Textbox(editWin)
-        editWin.addstr(0, 0, complexDataInstance.strVal)
+        editWin.addstr(0, 0, complexDataInstance.strVal if complexDataInstance.strVal else "")
         box.edit()
         # I think it automatically strips spaces, but just in case...
         results = box.gather().strip()
