@@ -985,8 +985,7 @@ class HexEditor(object):
             complexDataInstance.strVal = results
             self._modified = True
 
-    # TODO May eventually want to use mouse selection here to select search options.
-    @nomouse
+    # May eventually want to use mouse selection here to select search options.
     def showSearchDialog(self, stdscr):
         # For convenience, make search parameters persistent.
         if not hasattr(self, 'searchStr'):
@@ -995,7 +994,12 @@ class HexEditor(object):
             self.searchDirection = "forward"
             self.searchFormat = "text"
 
-        # TODO Define the sub window and draw out the input search elements and the input box
+        # Define a quick namespace object the we will use for elements to set
+        # in redraw that we will use for mouse selection
+        class Namespace(object): pass
+        ns = Namespace()
+
+        # Define the sub window and draw out the input search elements and the input box
         # Respond to Ctrl chars (or mouse events?) to change search parameters.
         # Perhaps even require a Ctrl char to open edit win to update search term
         # Enter key to run the search
@@ -1004,11 +1008,14 @@ class HexEditor(object):
             searchScreen.erase()
             searchScreen.bkgdset(' ')
             searchScreen.border('|', '|', '-', '-', '+', '+', '+', '+')
-            searchScreen.addstr(1, 1, "^Text: %s" % self.searchStr[:45])
+            ns.textStr = "^Text: %s" % self.searchStr[:45]
+            searchScreen.addstr(1, 1, ns.textStr)
             def dirSelected(direction):
                 return "*" if self.searchDirection == direction else " "
-            searchScreen.addstr(3, 1, "  ^Direction: [%s] Forward  [%s] Backward" % (
-                dirSelected("forward"), dirSelected("backward")))
+            ns.directionHeader = "  ^Direction:"
+            ns.forwardSelector = "[%s] Forward" % dirSelected("forward")
+            ns.backwardSelector = "[%s] Backward" % dirSelected("backward")
+            searchScreen.addstr(3, 1, ns.directionHeader + " " + ns.forwardSelector + "  " + ns.backwardSelector)
             searchScreen.addstr(5, 1, "  ^Format")
             def fmtSelected(fmt):
                 return "*" if self.searchFormat == fmt else " "
@@ -1018,27 +1025,60 @@ class HexEditor(object):
                 fmtSelected("U8"), fmtSelected("U16"), fmtSelected("U32"), fmtSelected("text")))
             searchScreen.refresh()
 
+        def performMouseClick(y, x, searchScreen):
+            if y == 3:
+                # Possible search direction change
+                if 0 <= x - (1+len(ns.directionHeader)+1) <= len(ns.forwardSelector)-1:
+                    self.searchDirection = "forward"
+                elif 0 <= x - (1+len(ns.directionHeader)+1+len(ns.forwardSelector)+2) <= len(ns.backwardSelector)-1:
+                    self.searchDirection = "backward"
+            elif y == 6:
+                if 5 <= x <= 10:
+                    self.searchFormat = 'S8'
+                elif 14 <= x <= 20:
+                    self.searchFormat = 'S16'
+                elif 24 <= x <= 30:
+                    self.searchFormat = 'S32'
+                elif 34 <= x <= 41:
+                    self.searchFormat = 'data'
+            elif y == 7:
+                if 5 <= x <= 10:
+                    self.searchFormat = 'U8'
+                elif 14 <= x <= 20:
+                    self.searchFormat = 'U16'
+                elif 24 <= x <= 30:
+                    self.searchFormat = 'U32'
+                elif 34 <= x <= 41:
+                    self.searchFormat = 'text'
+            elif y == 1:
+                if 1 <= x <= 1+len(ns.textStr)-1:
+                    openEditWindow()
+
+        def openEditWindow():
+            # Open the editwin to edit the search text
+            self.rectangle(searchScreen, 0, 7, 0+1+1, 7+45+1)
+            editWin = searchScreen.subwin(1, 45, 1, 7+1)
+            searchScreen.refresh()
+            box = Textbox(editWin)
+            box.edit()
+            # I think it automatically strips spaces, but just in case...
+            results = box.gather().strip()
+            self.searchStr = results[:45]
+
         # Now run a main loop for character input here. Also allow a sub edit window overlaying the searchStr for ^T input.
-        stdscr.timeout(-1)
+        curRawMouseState = None
+        searchScreen.timeout(-1)
         while True:
             redraw()
-            ch = stdscr.getch()
+            ch = searchScreen.getch()
 
             if ch == 27:
-                ch, key = self.readEscapes(stdscr)
+                ch, key = self.readEscapes(searchScreen)
             else:
                 key = curses.keyname(ch)
 
             if key == "^T":
-                # Open the editwin to edit the search text
-                self.rectangle(searchScreen, 0, 7, 0+1+1, 7+45+1)
-                editWin = searchScreen.subwin(1, 45, 1, 7+1)
-                searchScreen.refresh()
-                box = Textbox(editWin)
-                box.edit()
-                # I think it automatically strips spaces, but just in case...
-                results = box.gather().strip()
-                self.searchStr = results[:45]
+                openEditWindow()
             elif key == "^D":
                 # Toggle the search direction
                 self.searchDirection = "backward" if self.searchDirection == "forward" else "forward"
@@ -1047,6 +1087,26 @@ class HexEditor(object):
                 self.searchFormat = {'S8': 'S16', 'S16': 'S32', 'S32': 'data',
                         'data': 'U8', 'U8': 'U16', 'U16': 'U32', 'U32': 'text',
                         'text': 'S8'}[self.searchFormat]
+            elif key == "KEY_MOUSE":
+                # With the touch pad, I never see BUTTON1_CLICKED, I see BUTTON1_PRESSED followed by BUTTON1_RELEASED
+                idVal, x, y, z, bstate = curses.getmouse()
+                if bstate and (curses.BUTTON1_CLICKED or curses.BUTTON1_RELEASED):
+                    # Mouse button was clicked.
+                    # Find where we clicked and perform appropriate action
+                    performMouseClick(y, x, searchScreen)
+            elif isinstance(ch, str) and ch.startswith("\x1b[M") and len(ch) == 6:
+                if ord(ch[-3]) & 3 == 0:
+                    curRawMouseState = curses.BUTTON1_PRESSED
+                elif curRawMouseState == curses.BUTTON1_PRESSED and ord(ch[-3]) & 3 == 3:
+                    curRawMouseState = None
+                    # Now we have a mouse up after button was pressed (or
+                    #   curses.BUTTON1_RELEASED)
+                    xCode, yCode = tuple(ch[-2:])
+                    x = ord(xCode) - 33
+                    y = ord(yCode) - 33
+                    # Mouse button was clicked.
+                    # Find where we clicked (Repeated from above)
+                    performMouseClick(y, x, searchScreen)
             elif key == "^J":
                 # Do the search and return the found location (if any)
                 # Step 1: convert the appropriate search input into a string of bytes.
