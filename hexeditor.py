@@ -757,6 +757,8 @@ class HexEditor(object):
             else:
                 stdscr.timeout(500)
 
+            self.auxData.append("%d: %r ==> %s" % (loopCount, ch, key))
+
             if self.inputArea == "data" and key and key in '0123456789abcdefABCDEF':
                 # Here, we know it is not one of the navigation or control
                 # chars. We are editing binary data directly. Skip everything
@@ -870,7 +872,6 @@ class HexEditor(object):
                         self.performMouseClick(y, x, stdscr)
 
             loopCount += 1
-            self.auxData.append("%d: %r ==> %s" % (loopCount, ch, key))
             if key == "KEY_MOUSE" and self.debug:
                 buttonList = []
                 for i in range(1,5):
@@ -884,7 +885,7 @@ class HexEditor(object):
                         buttonList.append(stateName)
                 stateStr = ' | '.join(buttonList)
                 self.auxData.append("  Mouse: (%d, %d) %d [%s]" % (x, y, bstate, stateStr))
-            del self.auxData[0:-10]
+            del self.auxData[0:-15]
 
     def makePrintable(self, strVal):
         #return "".join([ch if ch in string.printable else "?" for ch in strVal])
@@ -1077,6 +1078,7 @@ class HexEditor(object):
             else:
                 key = curses.keyname(ch)
 
+            self.auxData.append("   %r ==> %s" % ( ch, key))
             if key == "^T":
                 openEditWindow()
             elif key == "^D":
@@ -1091,6 +1093,7 @@ class HexEditor(object):
                 # With the touch pad, I never see BUTTON1_CLICKED, I see BUTTON1_PRESSED followed by BUTTON1_RELEASED
                 idVal, x, y, z, bstate = curses.getmouse()
                 if bstate and (curses.BUTTON1_CLICKED or curses.BUTTON1_RELEASED):
+                    self.auxData.append("   Mouse ==> (%d, %d)" % ( y, x))
                     # Mouse button was clicked.
                     # Find where we clicked and perform appropriate action
                     performMouseClick(y, x, searchScreen)
@@ -1104,6 +1107,7 @@ class HexEditor(object):
                     xCode, yCode = tuple(ch[-2:])
                     x = ord(xCode) - 33
                     y = ord(yCode) - 33
+                    self.auxData.append("   Mouse ==> (%d, %d)" % ( y, x))
                     # Mouse button was clicked.
                     # Find where we clicked (Repeated from above)
                     performMouseClick(y, x, searchScreen)
