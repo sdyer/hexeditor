@@ -1111,6 +1111,23 @@ class HexEditor(object):
                     # Mouse button was clicked.
                     # Find where we clicked (Repeated from above)
                     performMouseClick(y, x, searchScreen)
+            elif isinstance(ch, str) and ch.startswith("\x1b[<0;"):
+                # This is a third "uncooked" mouse sequence variation I have seen.
+                # '\x1b[<0;1;2M'
+                # '\x1b[<0;1;2m'
+                if ch[-1] == "M":
+                    curRawMouseState = curses.BUTTON1_PRESSED
+                elif curRawMouseState == curses.BUTTON1_PRESSED and ch[-1] == "m":
+                    curRawMouseState = None
+                    # Now we have a mouse up after button was pressed (or
+                    #   curses.BUTTON1_RELEASED)
+                    _, xStr, yStr = ch[:-1].split(';')
+                    x = int(xStr) - 1
+                    y = int(yStr) - 1
+                    self.auxData.append("   Mouse ==> (%d, %d)" % ( y, x))
+                    # Mouse button was clicked.
+                    # Find where we clicked (Repeated from above)
+                    performMouseClick(y, x, searchScreen)
             elif key == "^J":
                 # Do the search and return the found location (if any)
                 # Step 1: convert the appropriate search input into a string of bytes.
