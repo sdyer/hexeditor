@@ -311,10 +311,10 @@ class HexEditor(object):
     def endian(self):
         return self._endian
     @endian.setter
-    def endian(self, tf):
-        if not tf in ('big', 'little'):
-            raise TypeError("Invalid endian specification: %r" % tf)
-        self._endian = tf
+    def endian(self, endianness):
+        if not endianness in ('big', 'little'):
+            raise TypeError("Invalid endian specification: %r" % endianness)
+        self._endian = endianness
 
     @property
     def mailbag(self):
@@ -341,6 +341,15 @@ class HexEditor(object):
     def debug(self, debug):
         self._debug = bool(debug)
 
+    @property
+    def recSize(self):
+        return self._recSize
+    @recSize.setter
+    def recSize(self, recSize):
+        if recSize is not None and (not isinstance(recSize, int) or recSize <= 0):
+            raise ValueError("Invalid record size: %r" % (recSize,))
+        self._recSize = recSize
+
     def __init__(self, filename, isWritable=False):
         self._stdscr = None
         self._filename = filename
@@ -359,18 +368,36 @@ class HexEditor(object):
         self.offsetWidth = 8
         (self.dataSectionCount, self.dataSectionBytes, self.dataColByteCount,
                 self.dataDisplayFormat) = byteDisplayFormatMap[self.dataFormat]
-        self.rowByteCount = self.dataSectionCount * self.dataSectionBytes
+        if self.recSize:
+            # For fixed record size, rowByteCount would get dynamically computed.
+            # TODO iff we are running with fixed record width, compute the number
+            # of full column sections of data and text that can be displayed with
+            # the current screen width (should be a basic algebra equation that can
+            # be solved). Base all the numbers below on that. Also correspondingly
+            # track the number of bytes that can be displayed on screen. The outer
+            # code will need to know this to decide of horizontal scrolling is
+            # needed to get the current cursor pos on screen.
+            self.rowByteCount = self.recSize
+            self.visibleDataSectionCount = int(
+                    (self.screenCols - 8) /
+                    (self.dataSectionBytes * self.dataColByteCount + self.dataSectionBytes + 2)
+            )
+            self.dataSectionCount, self.partialSection = divmod(self.rowByteCount, self.dataSectionBytes)
+        else:
+            self.rowByteCount = self.dataSectionCount * self.dataSectionBytes
+            self.visibleDataSectionCount = self.dataSectionCount
+            self.partialSection = 0
 
-        self.dataSectionWidth = self.dataSectionCount*self.dataSectionBytes*self.dataColByteCount + self.dataSectionCount - 1
+        self.dataSectionWidth = self.visibleDataSectionCount*self.dataSectionBytes*self.dataColByteCount + self.dataSectionCount - 1
         self.dataLeftCol = self.offsetWidth + 1
         self.dataRightCol = self.dataLeftCol + self.dataSectionWidth - 1
         self.dataFirstRow = 0
         self.statusRow = self.screenRows-1
-        # Maybe compute last rows more dynamically, depending on how many translated values at the bottom
+        # compute last rows more dynamically, depending on how many translated values at the bottom
         self.dataLastRow = self.statusRow-len(self.complexDataInstanceRows)-2
         self.dataRowCount = self.dataLastRow + 1 - self.dataFirstRow
 
-        self.textSectionWidth = self.dataSectionCount*self.dataSectionBytes + self.dataSectionCount - 1
+        self.textSectionWidth = self.visibleDataSectionCount*self.dataSectionBytes + self.dataSectionCount - 1
         self.textLeftCol = self.dataRightCol+2
         self.textRightCol = self.textLeftCol + self.textSectionWidth - 1
 
@@ -384,6 +411,7 @@ class HexEditor(object):
 
     @property
     def textDisplayCursorPos(self):
+        # TODO Rework for visibleDisplay and scrolling
         # Return the screen coordinates of self._cursorPos in the text
         # area. May be used when tabbing into the data display area to decide
         # where to put the cursor.
@@ -401,6 +429,7 @@ class HexEditor(object):
 
     @property
     def dataDisplayCursorPos(self):
+        # TODO Rework for visibleDisplay and scrolling
         # Return the screen coordinates of self._cursorPos in the data
         # area. May be used when tabbing into the data display area to decide
         # where to put the cursor.
@@ -417,6 +446,7 @@ class HexEditor(object):
         return yPos, xPos
 
     def convertScreenPosToCursorPos(self, y, x):
+        # TODO Rework for visibleDisplay and scrolling
         # Convert screen coordinates to the absolute byte position within
         # the file. (for converting a mouse click to a cursor movement).
         # First, I guess we decide if it is in the text area or data area. Return None (or maybe the current pos) if outside both.
@@ -454,6 +484,7 @@ class HexEditor(object):
     def resize(self, stdscr):
         # Compute the required width below instead of constant.
         self.computeScreenParams(stdscr)
+        # TODO Rework for visibleDisplay and scrolling
         assert self.screenCols > self.textRightCol, "Need at least %d columns for %s data display (%d)" % (
                 textRightCol+1, self.dataFormat, self.screenCols) 
 
@@ -484,6 +515,7 @@ class HexEditor(object):
             attr = curses.A_BOLD if colornum else 0
             stdscr.addstr(row, col, strVal, curses.color_pair(colornum) | attr | addAttr)
             rawLog('row: %r, col: %r, %r (%r)\n' % (row, col, strVal, curses.color_pair(colornum) | attr | addAttr))
+        # TODO Rework for visibleDisplay and scrolling
         for rowPtr in range(firstRowBytePos, firstRowBytePos + self.rowByteCount*(self.dataLastRow+1), self.rowByteCount):
             # Get the row offset in the correct format (hex or decimal)
             if self._offsetFormat == 'hex':
@@ -545,6 +577,9 @@ class HexEditor(object):
         # Separator lines
         #
         ####################################
+        # TODO When adding scrolling, if the left or right edge is off screen,
+        # add a scrolling indicator (vertical line of alternating / and \ chars
+        # instead of just a line of | characters).
         stdscr.vline(0, self.dataLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
         stdscr.vline(0, self.textLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
         stdscr.hline(self.dataLastRow+1, 0, '-', self.textRightCol)
@@ -663,6 +698,13 @@ class HexEditor(object):
         return "\x1b" + escape, key
 
     def moveCursor(self, byteCount, normalize=False):
+        # TODO Consider whether we need to take into account fixed width rows
+        # when doing this. Especially when determining whether horizontal
+        # scrolling is indicated as a result of the movement.
+        #   * If fixed width, we should have an indicator of the leftmost
+        #     visible column and the rightmost visible column. And, the current
+        #     row number and the current column number. If we move outside of
+        #     the visible columns, we must scoll horizontally to keep up.
         self._cursorPos += byteCount
         if byteCount >= 0:
             self._cursorPos = min(len(self._data_bytes)-1, self._cursorPos)
@@ -806,6 +848,12 @@ class HexEditor(object):
                     self.moveCursor(1)
                 elif ch == curses.KEY_LEFT:
                     self.moveCursor(-1)
+                elif ch == curses.KEY_SRIGHT:
+                    # TODO Scroll right
+                    pass
+                elif ch == curses.KEY_SLEFT:
+                    # TODO Scroll left
+                    pass
                 elif key == "KEY_HOME":
                     self._cursorPos = 0
                     #self._firstDisplayLine = 0
@@ -1363,6 +1411,8 @@ if __name__=="__main__":
             help="Interpret multi-byte numbers as big endian")
     group.add_argument('--little-endian', action='store_const', dest='endian', const='little',
             help="Interpret multi-byte numbers as little endian")
+    parser.add_argument('--rec-size', type=int, dest='recSize', default=None,
+            help="Specify a fixed record size.")
     parser.add_argument('--mailbag', '--mb', action='store_true', default=False,
             help="Do some ePriority mailbag specific parsing. Especially treat 8 digit ASCII hex numbers as timestamps.")
     parser.add_argument('inputFile',
@@ -1380,6 +1430,7 @@ if __name__=="__main__":
     editor.endian = args.endian
     editor.mailbag = args.mailbag
     editor.debug = args.debug
+    editor.recSize = args.recSize
 
     try:
         curses.wrapper(editor.mainLoop)
