@@ -370,16 +370,18 @@ class HexEditor(object):
                 self.dataDisplayFormat) = byteDisplayFormatMap[self.dataFormat]
         if self.recSize:
             # For fixed record size, rowByteCount would get dynamically computed.
-            # TODO iff we are running with fixed record width, compute the number
+            #
+            # iff we are running with fixed record width, compute the number
             # of full column sections of data and text that can be displayed with
             # the current screen width (should be a basic algebra equation that can
             # be solved). Base all the numbers below on that. Also correspondingly
             # track the number of bytes that can be displayed on screen. The outer
-            # code will need to know this to decide of horizontal scrolling is
+            # code will need to know this to decide if horizontal scrolling is
             # needed to get the current cursor pos on screen.
             self.rowByteCount = self.recSize
+            # TODO Verify this math if anything acts weird at all with fixed records
             self.visibleDataSectionCount = int(
-                    (self.screenCols - 8) /
+                    (self.screenCols - self.offsetWidth) /
                     (self.dataSectionBytes * self.dataColByteCount + self.dataSectionBytes + 2)
             )
             self.dataSectionCount, self.partialSection = divmod(self.rowByteCount, self.dataSectionBytes)
@@ -484,8 +486,7 @@ class HexEditor(object):
     def resize(self, stdscr):
         # Compute the required width below instead of constant.
         self.computeScreenParams(stdscr)
-        # TODO Rework for visibleDisplay and scrolling
-        assert self.screenCols > self.textRightCol, "Need at least %d columns for %s data display (%d)" % (
+        assert self.recSize or self.screenCols > self.textRightCol, "Need at least %d columns for %s data display (%d)" % (
                 textRightCol+1, self.dataFormat, self.screenCols) 
 
         # TODO Insted of failing, set a tooNarrowMessage that redraw will
@@ -513,23 +514,39 @@ class HexEditor(object):
         displayRow = 0
         def addstr(row, col, strVal, colornum, addAttr=0):
             attr = curses.A_BOLD if colornum else 0
-            stdscr.addstr(row, col, strVal, curses.color_pair(colornum) | attr | addAttr)
-            rawLog('row: %r, col: %r, %r (%r)\n' % (row, col, strVal, curses.color_pair(colornum) | attr | addAttr))
-        # TODO Rework for visibleDisplay and scrolling
+            #rawLog('row: %r, col: %r, %r (%r)\n' % (row, col, strVal, curses.color_pair(colornum) | attr | addAttr))
+            try:
+                stdscr.addstr(row, col, strVal, curses.color_pair(colornum) | attr | addAttr)
+            except:
+                raise curses.error("addstr(%r, %r, %r) return ERR" % (row, col, strVal))
+        # TODO if self.dataSectionCount > self.visibleDataSectionCount, then we must scroll horizontally.
+        # 
+        cursorLine, cursorLinePos = divmod(self._cursorPos, self.rowByteCount)
+        cursorDataSection = cursorLinePos // self.dataSectionBytes
+        isScrollableToLeft = self.firstVisibleDataSection > 0
+        isScrollableToRight = self.firstVisibleDataSection + self.visibleDataSectionCount + bool(self.partialSection) < self.dataSectionCount
         for rowPtr in range(firstRowBytePos, firstRowBytePos + self.rowByteCount*(self.dataLastRow+1), self.rowByteCount):
             # Get the row offset in the correct format (hex or decimal)
-            if self._offsetFormat == 'hex':
+            if self.recSize:
+                offsetStr = "%08d" % (rowPtr // self.rowByteCount)
+            elif self._offsetFormat == 'hex':
                 offsetStr = "%08x" % rowPtr
             else:
                 offsetStr = "%08d" % rowPtr
             stdscr.addstr(displayRow, 0, offsetStr)
 
-            displayCol = 9
+            displayCol = self.offsetWidth + 1
             textDisplayCol = self.textLeftCol
             rowBytePtr = rowPtr
-            for dataSection in range(self.dataSectionCount):
+            for dataSection in range(self.dataSectionCount + bool(self.partialSection)):
+                # We could compute where to start, but initially for simplicity, we will just skip until we get there
+                if dataSection < self.firstVisibleDataSection:
+                    rowBytePtr += self.dataSectionBytes
+                    continue
+                if dataSection > self.firstVisibleDataSection + self.visibleDataSectionCount - 1:
+                    continue
                 color_num = 0
-                for sectionByteCounter in range(self.dataSectionBytes):
+                for sectionByteCounter in range(self.dataSectionBytes if dataSection < self.dataSectionCount else self.partialSection):
                     if rowBytePtr == self._cursorPos:
                         extraAttr = curses.A_REVERSE | curses.A_BOLD
                         self._displayCursorRow = displayRow
@@ -558,7 +575,7 @@ class HexEditor(object):
                         # Everything still displays properly.
                         if str(e) == "addstr() returned ERR":
                             pass
-                            rawLog("addstr() returned ERR")
+                            rawLog("addstr() returned ERR\n")
                         else:
                             raise
                     color_num = 1 - color_num
@@ -577,11 +594,20 @@ class HexEditor(object):
         # Separator lines
         #
         ####################################
-        # TODO When adding scrolling, if the left or right edge is off screen,
+        # When adding scrolling, if the left or right edge is off screen,
         # add a scrolling indicator (vertical line of alternating / and \ chars
         # instead of just a line of | characters).
-        stdscr.vline(0, self.dataLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
-        stdscr.vline(0, self.textLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
+        # Use boolean isScrollableToLeft and isScrollableToRight
+        if isScrollableToLeft:
+            for row in range(self.dataFirstRow, self.dataLastRow+1):
+                stdscr.addch(row, self.dataLeftCol-1, '\\' if row & 1 else '/')
+        else:
+            stdscr.vline(0, self.dataLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
+        if isScrollableToRight:
+            for row in range(self.dataFirstRow, self.dataLastRow+1):
+                stdscr.addch(row, self.textLeftCol-1, '\\' if row & 1 else '/')
+        else:
+            stdscr.vline(0, self.textLeftCol-1, '|', self.dataLastRow+1-self.dataFirstRow)
         stdscr.hline(self.dataLastRow+1, 0, '-', self.textRightCol)
         stdscr.addch(self.dataLastRow+1, self.dataLeftCol-1, '+')
         stdscr.addch(self.dataLastRow+1, self.textLeftCol-1, '+')
@@ -710,7 +736,9 @@ class HexEditor(object):
             self._cursorPos = min(len(self._data_bytes)-1, self._cursorPos)
         if byteCount <= 0:
             self._cursorPos = max(0, self._cursorPos)
-        cursorLine = self._cursorPos // self.rowByteCount
+        cursorLine, cursorLinePos = divmod(self._cursorPos, self.rowByteCount)
+        cursorDataSection = cursorLinePos // self.dataSectionBytes
+
         eofFirstDisplayLine = max(len(self._data_bytes)//self.rowByteCount - self.dataRowCount + 1, 0)
         lastDisplayLine = self._firstDisplayLine + self.dataRowCount - 1
 
@@ -724,6 +752,15 @@ class HexEditor(object):
 
         self._firstDisplayLine = max(self._firstDisplayLine, 0)
         self._firstDisplayLine = min(self._firstDisplayLine, eofFirstDisplayLine)
+
+        if cursorDataSection < self.firstVisibleDataSection:
+            self.firstVisibleDataSection = cursorDataSection
+        elif cursorDataSection > self.firstVisibleDataSection + self.visibleDataSectionCount - 1:
+            self.firstVisibleDataSection = cursorDataSection - self.visibleDataSectionCount + 1
+        self.firstVisibleDataSection = min(
+                self.firstVisibleDataSection,
+                self.dataSectionCount + bool(self.partialSection) - self.visibleDataSectionCount + 1
+                )
 
     def performMouseClick(self, y, x, stdscr):
         # Only called from within mainLoop. Multiple possible ways to detect a
@@ -775,8 +812,10 @@ class HexEditor(object):
         stdscr.clear()
         self._cursorPos = 0
         self._firstDisplayLine = 0
+        self.firstVisibleDataSection = 0
         loopCount = 0
         while True:
+            rawLog("Params: cursorPos: %s, firstDisplayLine: %s, firstVisibleDataSection: %s\n" % (self._cursorPos, self._firstDisplayLine, self.firstVisibleDataSection,))
             # This might be way overkill, but in many cases we might not be
             # able to detect that a resize has occurred. It might just make
             # sense to check every time through and react. Running resize
@@ -850,10 +889,66 @@ class HexEditor(object):
                     self.moveCursor(-1)
                 elif ch == curses.KEY_SRIGHT:
                     # TODO Scroll right
-                    pass
+                    # FIXME Change this to work like page up/down. Add to
+                    # firstVisibleDataSection, then let moveCursor line it up
+                    # properly if it goes too far.
+                    #self.firstVisibleDataSection = min(
+                    #        self.firstVisibleDataSection + self.visibleDataSectionCount,
+                    #        self.dataSectionCount + bool(self.partialSection) - self.visibleDataSectionCount + 1
+                    #        )
+                    cursorLine = self._cursorPos // self.rowByteCount
+                    # maximum byte btr on this line
+                    maxLineBytePtr = cursorLine * self.rowByteCount + self.rowByteCount - 1
+                    self._cursorPos = min(
+                            self._cursorPos + self.visibleDataSectionCount*self.dataSectionBytes,
+                            maxLineBytePtr                            )
+                    self.moveCursor(0)
                 elif ch == curses.KEY_SLEFT:
                     # TODO Scroll left
-                    pass
+                    #self.firstVisibleDataSection = max(
+                    #        self.firstVisibleDataSection - self.visibleDataSectionCount,
+                    #        0
+                    #        )
+                    cursorLine = self._cursorPos // self.rowByteCount
+                    minLineBytePtr = cursorLine * self.rowByteCount
+                    self._cursorPos = max(
+                            self._cursorPos - self.visibleDataSectionCount*self.dataSectionBytes,
+                            minLineBytePtr
+                            )
+                    self.moveCursor(0)
+                elif key == "kRIT5":
+                    cursorLine = self._cursorPos // self.rowByteCount
+                    minLineBytePtr = cursorLine * self.rowByteCount
+                    maxLineBytePtr = minLineBytePtr + self.rowByteCount - 1
+                    if maxLineBytePtr + 1 - self._cursorPos < self.partialSection:
+                        # We are in the last partial sized data section. Jump to the first on the next row.
+                        self._cursorPos = maxLineBytePtr + 1
+                        self.moveCursor(0)
+                    else:
+                        self.moveCursor(self.dataSectionBytes)
+                elif key == "kLFT5":
+                    cursorLine = self._cursorPos // self.rowByteCount
+                    minLineBytePtr = cursorLine * self.rowByteCount
+                    maxLineBytePtr = minLineBytePtr + self.rowByteCount - 1
+                    if self._cursorPos - self.dataSectionBytes < minLineBytePtr and self.partialSection:
+                        # Jump to the previous row. Check to see if it has a partial last section
+                        self._cursorPos = maxLineBytePtr + 1
+                        self.moveCursor(0)
+                    else:
+                        self.moveCursor(-self.dataSectionBytes)
+                elif ch == curses.KEY_SEND:
+                    # Shift-End
+                    cursorLine = self._cursorPos // self.rowByteCount
+                    # maximum byte btr on this line
+                    maxLineBytePtr = cursorLine * self.rowByteCount + self.rowByteCount - 1
+                    self._cursorPos = maxLineBytePtr
+                    self.moveCursor(0)
+                elif ch == curses.KEY_SHOME:
+                    # Shift-Home
+                    cursorLine = self._cursorPos // self.rowByteCount
+                    minLineBytePtr = cursorLine * self.rowByteCount
+                    self._cursorPos = minLineBytePtr
+                    self.moveCursor(0)
                 elif key == "KEY_HOME":
                     self._cursorPos = 0
                     #self._firstDisplayLine = 0
