@@ -1489,7 +1489,7 @@ if __name__=="__main__":
         print "This is an interactive tool. Needs a TTY"
         sys.exit(1)
     from argparse import ArgumentParser
-    parser = ArgumentParser(description="Interactive hex editor.", epilog="Additional help with F1.", version="0.52")
+    parser = ArgumentParser(description="Interactive hex editor.", epilog="Additional help with F1.", version="0.53")
     parser.add_argument('--debug', '-d', action='store_true', default=False,
             help="Include some keycode debugging output and display info on F11.")
     parser.add_argument('--data-display-format', '--df', dest='dataFormat',
