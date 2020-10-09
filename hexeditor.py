@@ -516,7 +516,9 @@ class HexEditor(object):
             attr = curses.A_BOLD if colornum else 0
             #rawLog('row: %r, col: %r, %r (%r)\n' % (row, col, strVal, curses.color_pair(colornum) | attr | addAttr))
             try:
-                stdscr.addstr(row, col, strVal, curses.color_pair(colornum) | attr | addAttr)
+                #stdscr.addstr(row, col, strVal, curses.color_pair(colornum) | attr | addAttr)
+                for index, char in enumerate(strVal):
+                    stdscr.addch(row, col+index, char, curses.color_pair(colornum) | attr | addAttr)
             except:
                 raise curses.error("addstr(%r, %r, %r) return ERR" % (row, col, strVal))
         # TODO if self.dataSectionCount > self.visibleDataSectionCount, then we must scroll horizontally.
