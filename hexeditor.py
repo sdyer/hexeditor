@@ -125,41 +125,48 @@ class S8Field(IntField):
     header = 'S8'
     byte_count = 1
     max_size = 4
+    editPatternHint = "Signed 8-bit Integer: -128 <= n <= 127"
 
 class U8Field(IntField):
     recFmt = 'B'
     header = 'U8'
     byte_count = 1
     max_size = 3
+    editPatternHint = "Unsigned 8-bit Integer: 0 <= n <= 255"
 
 class S16Field(IntField):
     recFmt = 'h'
     header = 'S16'
     byte_count = 2
     max_size = 6
+    editPatternHint = "Signed 16-bit Integer: -32768 <= n <= 32767"
 
 class U16Field(IntField):
     recFmt = 'H'
     header = 'U16'
     byte_count = 2
     max_size = 5
+    editPatternHint = "Unsigned 16-bit Integer: 0 <= n <= 65535"
 
 class S32Field(IntField):
     recFmt = 'i'
     header = 'S32'
     byte_count = 4
     max_size = 11
+    editPatternHint = "Signed 32-bit Integer: -2^31 <= n <= 2^31-1"
 
 class U32Field(IntField):
     recFmt = 'I'
     header = 'U32'
     byte_count = 4
     max_size = 10
+    editPatternHint = "Unsigned 32-bit Integer: 0 <= n <= 2^32"
 
 class TimestampField(DataField):
     byte_count = 4
     recFmt = 'i'
     max_size = 19
+    editPatternHint = "Timestamp: yyyy/mm/dd hh:mm:ss"
     timeFmt = '%Y/%m/%d %H:%M:%S'
 
     def __init__(self, hex_editor):
@@ -214,6 +221,7 @@ class MBTimestampField(DataField):
     byte_count = 8
     max_size = 19
     header = 'UTC'
+    editPatternHint = "Timestamp: yyyy/mm/dd hh:mm:ss"
     timeFmt = '%Y/%m/%d %H:%M:%S'
 
     def __init__(self, hex_editor):
@@ -1131,7 +1139,7 @@ class HexEditor(object):
         editScreen.erase()
         editScreen.bkgdset(' ')
         editScreen.border('|', '|', '-', '-', '+', '+', '+', '+')
-        editScreen.addstr(1, 1, "Edit pattern hint")
+        editScreen.addstr(1, 1, complexDataInstance.editPatternHint)
 
         self.rectangle(editScreen, 5, 5, 5+1+1, 5+complexDataInstance.max_size+2)
         editWin = editScreen.subwin(1, complexDataInstance.max_size+1, 5+1, 5+1)
